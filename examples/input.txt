@@ -1,0 +1,2 @@
+Natural language processing helps computers process text.
+Natural language tasks require explicit evaluation.

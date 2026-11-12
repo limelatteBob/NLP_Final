@@ -1,0 +1,1 @@
+{"id":"offline_delegation_rag","goal":"DEMO research cosine similarity and write report.md","knowledge":["../examples/knowledge/similarity.md"],"checks":[{"kind":"contains","path":"report.md","text":"DEMO"},{"kind":"contains","path":"report.md","text":"doc_"},{"kind":"contains","path":"report.md","text":"cosine"}]}

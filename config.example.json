@@ -1,0 +1,23 @@
+{
+  "provider": "deepseek",
+  "base_url": "https://api.deepseek.com",
+  "model": "SET_TO_COURSE_MODEL",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "api_timeout": 60,
+  "max_response_tokens": 4096,
+  "thinking_mode": "default",
+  "max_model_calls": 80,
+  "max_steps": 100,
+  "max_task_steps": 20,
+  "max_tasks": 16,
+  "max_delegate_depth": 3,
+  "active_timeout": 900,
+  "tool_timeout": 30,
+  "docker_image": "python:3.11-slim",
+  "search_provider": "wikipedia",
+  "search_key_env": "BRAVE_API_KEY",
+  "github_remote": "",
+  "github_token_env": "EVOTASK_GITHUB_TOKEN",
+  "max_file_bytes": 262144,
+  "max_output_bytes": 65536
+}
