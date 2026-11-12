@@ -23,7 +23,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m evotask serve
 ```
 
-也可运行 `powershell -File .\start-web.ps1`，由脚本创建环境、安装依赖并启动。其他平台的命令见 [Web 手册](docs/webapp.md#启动与体验)。
+也可运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\start-web.ps1`，由脚本创建环境、安装依赖并启动。其他平台的命令见 [Web 手册](docs/webapp.md#启动与体验)。
 
 打开 **http://127.0.0.1:8000**，保持终端运行。下次启动只需执行上面的最后一条命令。
 
