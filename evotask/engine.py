@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .config import Config
-from .collaboration import ancestors, descendants, normalize_action, urls_in
+from .collaboration import ACTION_HELP, ancestors, descendants, normalize_action, urls_in
 from .providers import ProviderUnavailable
 from .retrieval import recall
 from .storage import AGENTS, Store, atomic_json, digest, safe_path, uid
@@ -167,7 +167,7 @@ class Engine:
         self.check_cancelled()
         if not isinstance(result, dict):
             raise ValueError("Provider must return a JSON object")
-        return normalize_action(result) if purpose == 'act' else result
+        return result
 
     def collaboration_context(self, run: dict, task: dict) -> dict:
         upstream = ancestors(run['tasks'], task['id'])
@@ -291,6 +291,57 @@ class Engine:
             raise ValueError('No failed verifier with recorded evidence is available')
         reason = next(h['result']['observed_error'] for h in reversed(verifier['history']) if h.get('result', {}).get('observed_error'))
         return self.request_revision(run, verifier, reason)
+
+    def retryable_action_tasks(self, run: dict) -> list[dict]:
+        """Only reopen format failures that this controller can now interpret safely."""
+        if (run['status'] != 'failed' or run['pending'] or run['inflight'] or run.get('failure')
+                or run.get('action_retry_count', 0) >= 2
+                or run['steps'] >= self.config.max_steps
+                or run['model_calls'] >= self.config.max_model_calls
+                or run['active_seconds'] >= self.config.active_timeout):
+            return []
+        candidates = []
+        for task in run['tasks']:
+            if (task['status'] != 'failed' or not task['owner'] or not task['history']
+                    or task['steps'] >= self.config.max_task_steps):
+                continue
+            last = task['history'][-1]
+            result = last.get('result', {})
+            if not (result.get('observed_error') == 'Invalid agent action type'
+                    or result.get('error_type') == 'ActionProtocolError'):
+                continue
+            try:
+                action = normalize_action(last.get('action'))
+                if action['type'] != 'tool' or action == last.get('action'):
+                    continue
+                self.tools.validate(task['owner'], action['name'], action['args'])
+            except (ValueError, PermissionError, TypeError):
+                continue
+            candidates.append(task)
+        return candidates
+
+    def retry_actions(self, run: dict) -> None:
+        if Config(**run['config']) != self.config:
+            raise ValueError('Resume requires the original configuration')
+        tasks = self.retryable_action_tasks(run)
+        if not tasks:
+            raise ValueError('No recoverable action format failure within the remaining budget')
+        number = run.get('action_retry_count', 0) + 1
+        affected = set()
+        for task in tasks:
+            affected.update(descendants(run['tasks'], task['id']))
+            task.update(status='running', error_streak=0, summary='')
+            task['history'].append({'event': 'action_retry_requested', 'round': number,
+                'guidance': 'The controller now supports the previous tool format. Inspect workspace files '
+                            'and resume from observed results; no old action has been replayed. ' + ACTION_HELP})
+        for task in run['tasks']:
+            if (task['id'] in affected and task['status'] == 'failed'
+                    and task['summary'] == 'Required dependency did not succeed'):
+                task.update(status='pending', summary='', error_streak=0)
+        run.update(status='running', ended=None, finish_recorded=False, action_retry_count=number)
+        self.emit(run, 'human', 'action_retry_requested', {'task_ids': [t['id'] for t in tasks],
+            'round': number, 'message': '继续格式错误处的任务，保留上游结果、历史和原预算。'})
+        self.store.save(run)
 
     def wait(self, run: dict, task: dict | None, kind: str, question: str, action: dict | None = None,
              prepared: dict | None = None) -> None:
@@ -465,9 +516,16 @@ class Engine:
                 "verified": True, "evidence": {"artifacts": task["artifact_ids"], "checks": outcomes}, "kind": "success"})
         self.store.save(run)
 
+    def normalize_decision(self, run: dict, task: dict, action: dict) -> dict:
+        normalized = normalize_action(action)
+        if normalized != action:
+            self.emit(run, task['owner'], 'action_normalized', {'task_id': task['id'],
+                'original_type': action.get('type'), 'original_keys': sorted(action),
+                'type': normalized['type'], 'name': normalized.get('name')})
+        return normalized
+
     def action(self, run: dict, task: dict, action: dict, approved: bool = False, prepared: dict | None = None) -> None:
-        if not isinstance(action, dict) or action.get("type") not in {"tool", "ask", "delegate", "finish", "fail", "request_revision"}:
-            raise ValueError("Invalid agent action type")
+        action = self.normalize_decision(run, task, action)
         kind = action["type"]
         if kind == 'request_revision':
             self.request_revision(run, task, str(action.get('reason', '')), action.get('target_task'))
@@ -603,6 +661,7 @@ class Engine:
                                'knowledge_base_ids': run.get('knowledge_base_ids'),
                                "clarifications": run["clarifications"]}
                     action = self.model(run, "act", context)
+                    action = self.normalize_decision(run, task, action)
                     self.action(run, task, action)
                 except Exception as exc:
                     if isinstance(exc, (ProviderUnavailable, RunCancelled)):

@@ -37,6 +37,7 @@ export function runsTable(runs, filtered = false) {
 }
 
 const eventLabels = {
+  action_normalized: '已适配工具调用格式', action_retry_requested: '继续格式错误处的任务',
   revision_requested: '退回作者修订', artifact_refreshed: '已交接修订版本', revision_unavailable: '返修暂不可用',
   run_created: '任务已创建', model_request: '请求模型决策', plan_created: '已生成任务计划',
   capability_bid: '评估任务匹配度', task_assigned: '接受任务分工', delegated: '发起子任务委派',

@@ -5,12 +5,61 @@ import re
 from urllib.parse import urlsplit
 
 
+ACTION_TYPES = {'tool', 'ask', 'delegate', 'finish', 'fail', 'request_revision'}
+TOOL_ARGUMENTS = {
+    'list_files': (set(), set()),
+    'read_file': ({'path'}, {'path', 'offset', 'limit'}),
+    'write_file': ({'path', 'content'}, {'path', 'content'}),
+    'update_file': ({'path', 'old', 'new'}, {'path', 'old', 'new'}),
+    'delete_file': ({'path'}, {'path'}),
+    'retrieve_documents': ({'query'}, {'query', 'limit'}),
+    'web_search': ({'query'}, {'query'}), 'fetch_url': ({'url'}, {'url'}),
+    'python_run': ({'path'}, {'path'}),
+    'git_publish': ({'paths'}, {'paths', 'branch'}),
+}
+ACTION_HELP = ('Return exactly one action with type tool, ask, delegate, finish, fail or request_revision. '
+               'For a file write use {"type":"tool","name":"write_file",'
+               '"args":{"path":"output.md","content":"..."}}. '
+               'Use only tools from context; inspect previous results before retrying.')
+
+
+class ActionProtocolError(ValueError):
+    """Malformed model decision; no tool has been executed."""
+
+
 def normalize_action(value: dict) -> dict:
-    # Accept the common API envelope, but never guess between conflicting actions.
-    if 'type' not in value and set(value) <= {'purpose', 'action'} and isinstance(value.get('action'), dict):
+    """Adapt unambiguous tool shorthand, without granting any tool permissions."""
+    def invalid(reason):
+        raise ActionProtocolError(f'{reason}. {ACTION_HELP}')
+
+    if not isinstance(value, dict):
+        invalid('Agent action must be a JSON object')
+    if 'action' in value:
+        if not (set(value) <= {'purpose', 'action'} and isinstance(value['action'], dict)):
+            invalid('Conflicting action envelope')
         if value.get('purpose', 'act') != 'act':
-            raise ValueError('Action envelope has the wrong purpose')
-        return value['action']
+            invalid('Action envelope has the wrong purpose')
+        value = value['action']
+        if 'action' in value:
+            invalid('Nested action envelopes are not supported')
+    kind = value.get('type')
+    if not isinstance(kind, str):
+        invalid('Agent action needs a string type')
+    if kind in TOOL_ARGUMENTS:
+        required, allowed = TOOL_ARGUMENTS[kind]
+        if set(value) == {'type', 'args'}:
+            args = value['args']
+        else:
+            args = {k: v for k, v in value.items() if k != 'type'}
+        if not isinstance(args, dict) or not required <= args.keys() or not args.keys() <= allowed:
+            invalid(f'Invalid or conflicting arguments for {kind}; required={sorted(required)}, allowed={sorted(allowed)}')
+        return {'type': 'tool', 'name': kind, 'args': args}
+    if kind not in ACTION_TYPES:
+        invalid(f'Invalid agent action type: {kind[:80]!r}')
+    if kind == 'tool' and (not set(value) <= {'type', 'name', 'args'}
+                           or not isinstance(value.get('name'), str)
+                           or not isinstance(value.get('args', {}), dict)):
+        invalid('Tool action needs name and args, with no extra action fields')
     return value
 
 

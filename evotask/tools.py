@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from .config import Config
+from .collaboration import TOOL_ARGUMENTS
 from .gittools import GitPublisher, github_target
 from .network import fetch_text, search_web
 from .retrieval import KnowledgeBase
@@ -47,13 +48,7 @@ class Tools:
             raise PermissionError(f"{agent} is not authorized for {name}")
         if not isinstance(args, dict):
             raise ValueError("Tool args must be an object")
-        fields = {"list_files": (set(), set()), "read_file": ({"path"}, {"path", "offset", "limit"}),
-                  "write_file": ({"path", "content"}, {"path", "content"}),
-                  "update_file": ({"path", "old", "new"}, {"path", "old", "new"}),
-                  "delete_file": ({"path"}, {"path"}), "retrieve_documents": ({"query"}, {"query", "limit"}),
-                  "web_search": ({"query"}, {"query"}), "fetch_url": ({"url"}, {"url"}),
-                  "python_run": ({"path"}, {"path"}), "git_publish": ({"paths"}, {"paths", "branch"})}
-        required, allowed = fields[name]
+        required, allowed = TOOL_ARGUMENTS[name]
         if not required <= args.keys() or not args.keys() <= allowed:
             raise ValueError(f"Invalid arguments for {name}; required={sorted(required)}, allowed={sorted(allowed)}")
 

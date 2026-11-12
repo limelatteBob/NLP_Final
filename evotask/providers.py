@@ -50,6 +50,10 @@ PURPOSE act: choose exactly one action:
 {"type":"fail","reason":"cannot complete within constraints"}.
 Return the action directly; do not wrap it in purpose/action. The controller tolerates that exact
 envelope for compatibility but rejects ambiguous actions.
+Tool names belong in name, never in type. To write a document return
+{"type":"tool","name":"write_file","args":{"path":"speech_draft.md","content":"actual document text"}}.
+Tool argument descriptions in context.tools describe args only, not the whole action.
+After an action format error, use its schema guidance to correct the next action; do not repeat it.
 Actions and tool results are persisted. Use observations and workspace listings to avoid repeat calls.
 Delegate only a bounded independent subtask; wait for its artifacts, then continue your own work.
 Use input file paths exactly as provided. You may read inputs but cannot modify the inputs/ directory.

@@ -180,7 +180,8 @@ class CollaborationTests(unittest.TestCase):
         action = {'type': 'tool', 'name': 'list_files', 'args': {}}
         self.assertEqual(normalize_action({'purpose': 'act', 'action': action}), action)
         ambiguous = {'type': 'fail', 'action': action}
-        self.assertEqual(normalize_action(ambiguous), ambiguous)
+        with self.assertRaisesRegex(ValueError, 'Conflicting'):
+            normalize_action(ambiguous)
         with self.assertRaises(ValueError):
             normalize_action({'purpose': 'plan', 'action': action})
 

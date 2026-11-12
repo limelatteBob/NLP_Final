@@ -17,6 +17,8 @@ except ImportError:
 from evotask.config import Config
 from evotask.providers import DemoProvider
 from evotask.providers import ProviderUnavailable
+from evotask.engine import Engine
+from tests.test_action_protocol import SpeechProvider, legacy_normalize
 
 
 @unittest.skipIf(TestClient is None, 'Install .[web,test-web] to test HTTP services')
@@ -74,6 +76,29 @@ class WebTests(unittest.TestCase):
         self.assertEqual(export.json()['run']['status'], 'succeeded')
         self.assertIn('events', export.json())
         self.assertGreater(len(self.client.get('/api/agents/coordinator/memory').json()), 0)
+
+    def test_retry_action_format_failure_is_isolated_and_keeps_review(self):
+        with patch('evotask.web.app.make_provider', return_value=SpeechProvider()), \
+                patch.object(Engine, 'normalize_decision', legacy_normalize):
+            run_id = self.start_run(goal='K-pop 项目汇报', review=False)
+            failed = self.wait_idle(run_id)
+        self.assertEqual(failed['status'], 'failed')
+        self.assertTrue(failed['can_retry_actions'])
+        url = f'/api/runs/{run_id}/retry-actions'
+        other = TestClient(self.app)
+        self.bootstrap(other)
+        self.assertEqual(other.post(url, json={}).status_code, 404)
+        self.assertEqual(self.client.post(url, json={}, headers={'X-EvoTask-CSRF': 'bad'}).status_code, 403)
+        self.assertEqual(self.client.post(url + '?mode=live', json={}).status_code, 404)
+        with patch('evotask.web.app.make_provider', return_value=SpeechProvider()):
+            self.assertEqual(self.client.post(url, json={}).status_code, 202)
+            resumed = self.wait_idle(run_id)
+        self.assertEqual(resumed['status'], 'waiting_human')
+        self.assertEqual(resumed['pending']['task_id'], 't2')
+        self.assertFalse(resumed['can_retry_actions'])
+        self.assertEqual(resumed['tasks'][0], failed['tasks'][0])
+        self.assertEqual(self.client.post(url, json={}).status_code, 409)
+        self.assertTrue(any(a['path'] == 'speech_draft.md' for a in resumed['artifacts']))
 
     def test_sessions_modes_and_downloads_are_isolated(self):
         run_id = self.start_run(review=False)

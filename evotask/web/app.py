@@ -441,6 +441,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             result.update(tasks=run["tasks"], artifacts=run["artifacts"], pending=run["pending"],
                           initial_inputs=run["initial_inputs"], uploaded_files=run.get('uploaded_files', []),
                           knowledge_base_ids=run.get('knowledge_base_ids'), revisions=run.get('revisions', []),
+                          can_retry_actions=bool(Engine(store, Config(**run['config']), None).retryable_action_tasks(run)),
                           can_repair=(run['status'] == 'failed' and run.get('revision_count', 0) < 2
                                       and any(t['status'] == 'failed' and t['role'] == 'verifier' for t in run['tasks'])))
         return result
@@ -720,6 +721,24 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                     raise HTTPException(409, "该任务无需恢复，或需要先处理人工请求。")
             jobs.submit(target, run_id, Config(**run["config"]), event)
             return {"accepted": True}
+        except Exception:
+            jobs.release(target)
+            raise
+
+    @app.post('/api/runs/{run_id}/retry-actions', status_code=202)
+    def retry_actions(request: Request, run_id: str, mode: Mode = 'demo'):
+        target = workspace(request, mode)
+        event = jobs.reserve(target, run_id)
+        try:
+            with storage(request, mode) as store, store.lock():
+                run = get_run(store, run_id)
+                cfg = Config(**run['config'])
+                engine = Engine(store, cfg, None)
+                if not engine.retryable_action_tasks(run):
+                    raise HTTPException(409, '没有可继续的动作格式错误，或剩余预算不足。')
+                engine.retry_actions(run)
+            jobs.submit(target, run_id, cfg, event)
+            return {'accepted': True}
         except Exception:
             jobs.release(target)
             raise
