@@ -15,3 +15,4 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { throw 'Unable to install Web dependencies.' }
 }
 & $pythonPath -m evotask serve --host $BindAddress --port $Port
+exit $LASTEXITCODE

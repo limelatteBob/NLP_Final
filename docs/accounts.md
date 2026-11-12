@@ -40,7 +40,7 @@ EVOTASK_WEB_ALLOWED_HOSTS=localhost,127.0.0.1,192.168.1.20
 停止旧服务后，在项目目录启动：
 
 ```powershell
-powershell -File .\start-web.ps1 -BindAddress 0.0.0.0 -Port 8000
+.\start-web.cmd -BindAddress 0.0.0.0 -Port 8000
 # 或
 .\.venv\Scripts\python.exe -m evotask serve --host 0.0.0.0 --port 8000
 ```

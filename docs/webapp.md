@@ -10,7 +10,7 @@ Windows，在项目根目录：
 .\.venv\Scripts\python.exe -m evotask serve
 ```
 
-访问 http://127.0.0.1:8000 。首次安装的另一台机器可以运行 `powershell -File .\start-web.ps1`。也可执行：
+访问 http://127.0.0.1:8000 。首次安装的另一台 Windows 机器可以双击 `start-web.cmd`，或在 PowerShell 运行 `.\start-web.cmd`；该入口自动处理本次进程的脚本执行策略，启动失败时保留窗口显示原因。也可执行：
 
 ```powershell
 python -m venv .venv
