@@ -1,0 +1,75 @@
+.collaboration-network { width: 100%; min-width: 0; overflow: hidden; container-type: inline-size; }
+.network-heading { padding: 17px 16px 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.network-heading strong { font-size: 14px; color: #3c634c; }
+.network-summary { color: #7a8c7f; font-size: 11px; }
+.network-stage { --network-vertical: 0; position: relative; height: 355px; margin: 0 8px; }
+.network-lines { position: absolute; width: 100%; height: 100%; inset: 0; overflow: visible; }
+.network-node { position: absolute; width: 124px; height: 82px; padding: 8px 4px; border: 1px solid #dce5da; background: #fbfdfa; border-radius: 12px; display: grid; grid-template-columns: 26px 1fr; align-content: center; gap: 4px 3px; color: #476752; }
+.network-node > .agent-icon { width: 24px; height: 24px; grid-row: span 3; align-self: center; margin: 0; }
+.network-node > .agent-icon .icon { width: 15px; height: 15px; }
+.network-node strong { font-size: 11px; font-weight: 600; }
+.network-status { font-size: 10px; white-space: nowrap; }
+.network-count { color: #7e8c80; font-size: 9px; white-space: nowrap; }
+.network-node.coordinator { top: 10px; left: calc(50% - 62px); }
+.network-node.researcher { top: 135px; left: 7px; }
+.network-node.coder { top: 135px; right: 7px; }
+.network-node.verifier { bottom: 10px; left: calc(50% - 62px); }
+.network-node:hover, .network-node.selected { border-color: #619677; background: #f2f8ef; }
+.network-node[data-status="running"] { border-color: #378a65; background: #edf8ef; animation: network-breathe 2.3s ease-in-out infinite; }
+.network-node[data-status="running"] .network-status { color: #24714d; font-weight: 650; }
+.network-node[data-status="waiting_human"], .network-node[data-status="waiting_child"], .network-node[data-status="paused"] { border-color: #d5ba81; background: #fffaf0; }
+.network-node[data-status="failed"], .network-node[data-status="interrupted"] { border-color: #dba297; background: #fff5f2; }
+.network-node[data-status="failed"] .network-status, .network-node[data-status="interrupted"] .network-status { color: #9a4b3b; }
+.network-node[data-status="succeeded"] .network-status { color: #418057; }
+.network-node[data-status="idle"] { background: #f8f9f7; color: #8d968d; }
+.network-lines g { color: #749582; cursor: pointer; }
+.relation-base { stroke: #719782; stroke-width: 1.6; fill: none; }
+.network-lines g.planned .relation-base { stroke: #a6b2a7; stroke-dasharray: 5 4; }
+.relation-hit { stroke: transparent; stroke-width: 16; fill: none; pointer-events: stroke; }
+.relation-pulse { fill: none; stroke: #249164; stroke-width: 3.5; stroke-dasharray: 8 10; opacity: 0; pointer-events: none; }
+.network-lines g:hover .relation-base, .network-lines g:focus .relation-base, .network-lines g.selected .relation-base { stroke: #236a4a; stroke-width: 2.6; }
+.network-lines g:focus-visible { outline: none; }
+.network-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px 13px; font-size: 10px; color: #859086; padding: 3px 12px 15px; }
+.network-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.line-sample { display: inline-block; width: 19px; border-top: 2px solid #719782; }
+.line-sample.planned { border-top-style: dashed; border-color: #a6b2a7; }
+.network-edge-list { display: grid; grid-template-columns: 1fr; gap: 5px; padding: 0 12px 12px; }
+.network-edge-button { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; text-align: left; padding: 8px 10px; background: #f7f9f5; border: 1px solid transparent; border-radius: 7px; min-width: 0; }
+.network-edge-button span { font-size: 10px; color: #506f5b; }
+.network-edge-button small { color: #8c998c; font-size: 9px; overflow-wrap: anywhere; }
+.network-edge-button.selected { background: #edf5e8; border-color: #a6c2a3; }
+.network-empty { color: #8a978b; font-size: 11px; line-height: 1.8; margin: 0 5px; }
+.network-details { border-top: 1px solid #e2e9df; background: #fbfcf9; padding: 14px; max-height: 360px; overflow: auto; overscroll-behavior: contain; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.network-detail-heading { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.network-detail-heading > button { font-size: 20px; padding: 0 5px; }
+.network-details ul { padding: 0; margin: 8px 0; list-style: none; }
+.network-details li { padding: 10px 0; border-bottom: 1px solid #e7ece3; }
+.network-details p { margin: 6px 0; color: #6c7e70; white-space: pre-wrap; }
+.network-details small { display: block; font-size: 10px; color: #8b978a; }
+.network-task-link { display: block; font-size: 11px; color: #317552; text-align: left; padding: 4px 0; overflow-wrap: anywhere; }
+.network-task-link:hover { text-decoration: underline; }
+.network-details h4 { font-size: 12px; margin-bottom: 3px; }
+#artifact-panels { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+/* The homepage is a static team introduction, not an executing task graph. */
+.launch-grid > .team-visual .core-halo, .launch-grid > .team-visual .edge { animation: none; }
+@keyframes network-breathe { 0%, 100% { box-shadow: 0 0 0 2px #419c6520; } 50% { box-shadow: 0 0 0 7px #419c650b; } }
+@container (max-width: 330px) {
+  .network-stage { --network-vertical: 1; height: 435px; }
+  .network-node { width: 172px; left: calc(50% - 86px) !important; right: auto !important; }
+  .network-node.coordinator { top: 10px; }
+  .network-node.researcher { top: 120px; }
+  .network-node.coder { top: 230px; }
+  .network-node.verifier { top: 340px; bottom: auto; }
+}
+@media (max-width: 700px) {
+  .detail-side > .collaboration-network { display: block; }
+  .network-stage { --network-vertical: 1; height: 435px; }
+  .network-node { width: 172px; left: calc(50% - 86px) !important; right: auto !important; }
+  .network-node.coordinator { top: 10px; }
+  .network-node.researcher { top: 120px; }
+  .network-node.coder { top: 230px; }
+  .network-node.verifier { top: 340px; bottom: auto; }
+}
+@media (prefers-reduced-motion: reduce) { .network-node[data-status="running"] { animation: none; box-shadow: 0 0 0 2px #419c6520; } }
+
+.network-stale .network-node[data-status="running"] { animation-play-state: paused; }

@@ -40,3 +40,13 @@
 @media(max-width:700px){.base-toolbar{flex-wrap:wrap;gap:12px;padding:16px}.base-toolbar .field{flex:1;min-width:180px}.base-description{order:4;flex-basis:100%}.document-row .doc-info{min-width:170px}.document-actions{margin-left:0}.task-knowledge{margin-left:16px;margin-right:16px}.page-title>.btn{flex-shrink:0}}
 
 .base-delete{flex-shrink:0}.deletion-preview{max-height:190px;overflow:auto;padding-left:22px;font-size:12px;line-height:2;color:#7c6b62;overflow-wrap:anywhere}
+
+/* Artifact identities remain legible in narrow screens. */
+.artifact-name { min-width: 0; text-align: left; }
+.artifact-name strong, .artifact-name small { overflow-wrap: anywhere; white-space: normal; }
+.artifact-name small { display: block; margin-top: 4px; }
+.artifact-section { width: 100%; }
+.artifact-section > summary { cursor: pointer; }
+.artifact-toggle { width: 14px; height: 14px; }
+.artifact-section[open] .artifact-toggle { transform: rotate(90deg); }
+.retry-links { margin: 0 0 16px; overflow-wrap: anywhere; }

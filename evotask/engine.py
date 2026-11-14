@@ -12,6 +12,7 @@ from .providers import ProviderUnavailable
 from .retrieval import recall
 from .storage import AGENTS, Store, atomic_json, digest, safe_path, uid
 from .tools import CAPABILITIES, Tools
+from .outputs import validate_outputs
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -70,7 +71,8 @@ def task_from_spec(spec: dict, task_id: str | None = None, parent: str | None = 
             "required_tools": required, "depends_on": dependencies, "checks": checks,
             "parent": parent, "depth": depth, "owner": None, "status": "pending", "history": [],
             "steps": 0, "error_streak": 0, "inputs": [], "children": [], "artifact_ids": [],
-            "memory_hits": [], "bids": [], "summary": "", "allowed_citations": []}
+            "memory_hits": [], "bids": [], "summary": "", "allowed_citations": [],
+            "outputs": validate_outputs(spec.get("outputs"))}
 
 
 def validate_plan(specs: object, limit: int) -> list[dict]:
@@ -127,18 +129,19 @@ class Engine:
             self.progress(f"[{agent}] {kind}: {json.dumps(data, ensure_ascii=False)[:500]}")
 
     def new(self, goal: str, inputs: list[Path] | None = None, memory: bool = True, require_review: bool = False,
-            *, input_names: list[str] | None = None, knowledge_base_ids: list[str] | None = None) -> dict:
+            *, input_names: list[str] | None = None, knowledge_base_ids: list[str] | None = None,
+            persist: bool = True, run_id: str | None = None) -> dict:
         if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 12000:
             raise ValueError("Goal must contain 1–12000 characters")
         self.tools.kb.validate_bases(knowledge_base_ids)
-        run = {"id": uid("run"), "goal": goal, "status": "planning", "created": time.time(), "ended": None,
+        run = {"id": run_id or uid("run"), "goal": goal, "status": "planning", "created": time.time(), "ended": None,
                "config": self.config.snapshot(), "config_hash": self.config.fingerprint(),
                "mode": "demo" if self.config.provider == "demo" else "live", "tasks": [], "artifacts": [],
                "pending": None, "inflight": None, "steps": 0, "model_calls": 0, "active_seconds": 0.0,
                "human_wait_seconds": 0.0, "clarifications": [], "memory_enabled": memory,
                "initial_memory_hashes": {a: digest(json.dumps(self.store.memory(a), sort_keys=True).encode()) for a in AGENTS},
                "initial_inputs": [], "failure": None, "finish_recorded": False, "require_review": require_review,
-               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": []}
+               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2}
         for index, source in enumerate(inputs or []):
             if source.suffix.lower() not in {".md", ".txt"} or not source.is_file():
                 raise ValueError("Task inputs must be existing .md/.txt files")
@@ -151,9 +154,11 @@ class Engine:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
             run["initial_inputs"].append(relative)
-        self.store.message("group", "human", goal)
-        self.store.save(run)
-        self.emit(run, "coordinator", "run_created", {"mode": run["mode"], "config_hash": run["config_hash"]})
+            run.setdefault("input_manifest", []).append({"path": relative, "name": name})
+        if persist:
+            self.store.message("group", "human", goal)
+            self.store.save(run)
+            self.emit(run, "coordinator", "run_created", {"mode": run["mode"], "config_hash": run["config_hash"]})
         return run
 
     def model(self, run: dict, purpose: str, context: dict) -> dict:
@@ -383,7 +388,7 @@ class Engine:
         if run["memory_enabled"]:
             task["memory_hits"] = recall(self.store, task["owner"], task["objective"])
         self.emit(run, task["owner"], "memory_recalled", {"task_id": task["id"], "ids": [m["id"] for m in task["memory_hits"]]})
-        self.emit(run, task["owner"], "task_assigned", {"task_id": task["id"], "title": task["title"]})
+        self.emit(run, task["owner"], "task_assigned", {"task_id": task["id"], "title": task["title"], "objective": task["objective"]})
         self.store.message("group", task["owner"], f"接受任务 {task['id']}: {task['title']}")
         self.store.save(run)
 
@@ -416,7 +421,7 @@ class Engine:
         run["tasks"].append(child)
         task["children"].append(child["id"])
         task["status"] = "waiting_child"
-        self.emit(run, task["owner"], "delegated", {"from_task": task["id"], "to_task": child["id"], "role": child["role"]})
+        self.emit(run, task["owner"], "delegated", {"from_task": task["id"], "to_task": child["id"], "role": child["role"], "title": child["title"]})
         return {"child_task": child["id"], "status": "waiting_child"}
 
     def check_citations(self, task: dict, artifact: dict) -> None:
@@ -441,6 +446,9 @@ class Engine:
         root = self.store.workspace(task["owner"], run["id"])
         for path in paths:
             self.tools._file(root, path, writing=True)
+        required_outputs = {o['path'] for o in task.get('outputs', []) if o['kind'] == 'deliverable'}
+        if not required_outputs <= set(paths):
+            raise ValueError('finish must export every declared deliverable: ' + ', '.join(sorted(required_outputs - set(paths))))
         if frozen:
             artifacts = []
             for approved_artifact in frozen:
@@ -449,7 +457,7 @@ class Engine:
                     raise ValueError("Approved artifact manifest changed")
                 artifacts.append(stored)
         else:
-            artifacts = [self.store.archive(run, task["owner"], p, task["id"]) for p in paths]
+            artifacts = [self.store.archive(run, task["owner"], p, task["id"], origin="finish") for p in paths]
         outcomes = []
         try:
             self.check_frozen_tests(run, task)
@@ -508,7 +516,7 @@ class Engine:
         task["status"] = "succeeded"
         task["summary"] = str(action.get("summary", ""))[:3000]
         task["history"].append({"action": action, "result": {"checks": outcomes, "success": True}})
-        self.emit(run, task["owner"], "task_succeeded", {"task_id": task["id"], "artifacts": task["artifact_ids"], "checks": outcomes})
+        self.emit(run, task["owner"], "task_succeeded", {"task_id": task["id"], "artifacts": task["artifact_ids"], "checks": outcomes, "summary": task["summary"]})
         self.store.message("group", task["owner"], f"任务 {task['id']} 通过声明的检查：{task['summary']}")
         if run["memory_enabled"]:
             self.store.remember(task["owner"], {"id": f"{run['id']}:{task['id']}:success:{run.get('revision_count', 0)}", "run_id": run["id"],

@@ -25,6 +25,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..config import Config
+from ..conversations import team_messages
+from ..outputs import describe_artifacts, grouped_artifacts
+from ..retries import existing_retry, create_retry
 from ..collaboration import valid_source_url
 from ..documents import extract_document, file_digest
 from ..engine import Engine, TERMINAL
@@ -61,6 +64,10 @@ class RunInput(Payload):
     files: list[TextFile] = Field(default_factory=list)
     upload_ids: list[str] = Field(default_factory=list)
     knowledge_base_ids: list[str] | None = None
+
+
+class RetryInput(Payload):
+    request_key: str = Field(min_length=16, max_length=80, pattern=r'^[A-Za-z0-9_-]+$')
 
 
 class ReplyInput(Payload):
@@ -257,7 +264,12 @@ class Jobs:
                     else:
                         engine.advance(store.load(run_id))
             except Exception:
-                # Preserve resumable state, never expose exception internals or credentials.
+                # A new retry must not remain falsely running after worker failure.
+                run = store.load(run_id)
+                if run.get('retry_of') and run['status'] not in TERMINAL:
+                    run.update(status='failed', failure='执行服务中断；可以重新运行。', ended=time.time())
+                    store.save(run)
+                # Preserve evidence, never expose exception internals or credentials.
                 store.event(run_id, "coordinator", "service_error", {
                     "message": "执行服务中断；状态已保留，可检查后继续运行。"})
             finally:
@@ -294,6 +306,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
     if len(secret) != 32:
         raise ValueError("Invalid Web session key; restore the state directory")
     jobs = Jobs()
+    retry_lock = threading.Lock()
     accounts = Accounts(root)
     login_attempts: dict[str, list[float]] = {}
     login_lock = threading.Lock()
@@ -431,6 +444,13 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                   "memory_enabled", "model_calls", "steps", "active_seconds", "human_wait_seconds")
         result = {k: run[k] for k in fields}
         result["metrics"] = Engine(store, Config(**run["config"]), None).metrics(run)
+        presented = describe_artifacts(run, store.events(run['id']))
+        groups = grouped_artifacts(presented)
+        result['deliverable_count'] = len(groups['deliverable'])
+        result['retry_of'] = run.get('retry_of')
+        result['retry_root'] = run.get('retry_root')
+        result['retry_children'] = run.get('retry_children', [])
+        result['can_retry'] = run['status'] == 'failed' and jobs.info(store.root)['run_id'] != run['id']
         result["artifact_count"] = len(run["artifacts"])
         result["task_count"] = len(run["tasks"])
         result["completed_tasks"] = sum(t["status"] == "succeeded" for t in run["tasks"])
@@ -438,7 +458,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
         result["executing"] = info["busy"] and info["run_id"] == run["id"]
         result["cancelling"] = result["executing"] and info["cancelling"]
         if detail:
-            result.update(tasks=run["tasks"], artifacts=run["artifacts"], pending=run["pending"],
+            result.update(tasks=run["tasks"], artifacts=presented, artifact_groups=groups, pending=run["pending"],
                           initial_inputs=run["initial_inputs"], uploaded_files=run.get('uploaded_files', []),
                           knowledge_base_ids=run.get('knowledge_base_ids'), revisions=run.get('revisions', []),
                           can_retry_actions=bool(Engine(store, Config(**run['config']), None).retryable_action_tasks(run)),
@@ -710,6 +730,42 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             jobs.release(target)
             raise
 
+    @app.post('/api/runs/{run_id}/retry', status_code=202)
+    def retry_run(request: Request, run_id: str, body: RetryInput, mode: Mode = 'demo'):
+        with retry_lock, storage(request, mode) as store:
+            source = get_run(store, run_id)
+            found = existing_retry(store, source, body.request_key)
+            if found:
+                return public_run(found, store)
+            if source['status'] != 'failed':
+                raise HTTPException(409, '只能重新运行已经失败的任务。')
+            if jobs.info(store.root)['run_id'] == run_id:
+                raise HTTPException(409, '原任务尚未停止执行，请稍后重试。')
+            if len(store.runs()) >= 200:
+                raise HTTPException(429, '当前空间已达到 200 次任务上限。')
+            cfg = run_config(mode)
+            if mode == 'live' and (cfg.provider == 'demo' or not os.environ.get(cfg.api_key_env) or cfg.model == 'SET_TO_COURSE_MODEL'):
+                raise HTTPException(422, '当前模型配置不可用，请先检查系统设置。')
+            target = workspace(request, mode)
+            event = jobs.reserve(target)
+            child = None
+            try:
+                with store.lock():
+                    source = get_run(store, run_id)
+                    child = create_retry(store, cfg, source, body.request_key)
+                result = public_run(child, store)
+                result['executing'] = True
+                jobs.submit(target, child['id'], cfg, event)
+            except Exception:
+                jobs.release(target)
+                if child is not None:
+                    child.update(status='failed', failure='任务已创建，但启动失败；可以重新运行。', ended=time.time())
+                    store.save(child)
+                    store.event(child['id'], 'coordinator', 'run_start_failed', {'reason':'Background scheduling failed'})
+                    return JSONResponse({'detail':child['failure'], 'run_id':child['id']}, status_code=503)
+                raise
+            return result
+
     @app.post("/api/runs/{run_id}/continue", status_code=202)
     def continue_run(request: Request, run_id: str, mode: Mode = "demo"):
         target = workspace(request, mode)
@@ -779,14 +835,14 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
     def artifact(request: Request, run_id: str, artifact_id: str, mode: Mode = "demo", download: bool = False):
         with storage(request, mode) as store:
             run = get_run(store, run_id)
-            entry = next((a for a in run["artifacts"] if a["id"] == artifact_id), None)
+            entry = next((a for a in describe_artifacts(run, store.events(run_id)) if a["id"] == artifact_id), None)
             if entry is None:
                 raise HTTPException(404, "产物不存在。")
             content = store.artifact_bytes(entry)
             if not download:
                 return {**entry, "content": content.decode("utf-8")}
             return Response(content, media_type="application/octet-stream", headers={
-                "Content-Disposition": "attachment; filename*=UTF-8''" + quote(Path(entry["path"]).name)})
+                "Content-Disposition": "attachment; filename*=UTF-8''" + quote(entry["download_name"])})
 
     @app.get("/api/runs/{run_id}/report")
     def report(request: Request, run_id: str, mode: Mode = "demo"):
@@ -1003,9 +1059,15 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             return store.memory(agent)
 
     @app.get("/api/chat")
-    def chat_history(request: Request, channel: Channel = "group", mode: Mode = "demo"):
+    def chat_history(request: Request, channel: Channel = "group", mode: Mode = "demo", run_id: str | None = None):
         with storage(request, mode) as store:
-            return store.messages("group" if channel == "group" else "private:" + channel, limit=100)
+            if run_id:
+                get_run(store, run_id)
+                if channel != 'group':
+                    raise HTTPException(422, '任务筛选仅用于团队群聊。')
+            if channel == 'group':
+                return team_messages(store, run_id=run_id)
+            return store.messages('private:' + channel, limit=100, metadata=True)
 
     @app.post("/api/chat")
     def chat(request: Request, body: ChatInput, mode: Mode = "demo"):
