@@ -70,6 +70,7 @@ class Store:
                 run_id TEXT NOT NULL, agent TEXT, kind TEXT, data TEXT NOT NULL, created REAL);
             CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, created REAL);
+            CREATE TABLE IF NOT EXISTS retry_requests(source_id TEXT NOT NULL, request_key TEXT NOT NULL, run_id TEXT NOT NULL, PRIMARY KEY(source_id, request_key));
         """)
         self.db.commit()
         for agent in AGENTS:
@@ -134,10 +135,11 @@ class Store:
             self.db.execute("INSERT INTO messages(channel,sender,body,created) VALUES (?,?,?,?)",
                             (channel, sender, body, time.time()))
 
-    def messages(self, channel: str, reader: str = "human", limit: int = 20) -> list[dict]:
+    def messages(self, channel: str, reader: str = "human", limit: int = 20, *, metadata: bool = False) -> list[dict]:
         if reader != "human" and channel != "group" and channel != f"private:{reader}":
             raise PermissionError("Private conversation is not visible to this agent")
-        rows = self.db.execute("SELECT sender,body FROM messages WHERE channel=? ORDER BY seq DESC LIMIT ?",
+        columns = "seq,sender,body,created" if metadata else "sender,body"
+        rows = self.db.execute(f"SELECT {columns} FROM messages WHERE channel=? ORDER BY seq DESC LIMIT ?",
                                (channel, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
 
@@ -160,7 +162,7 @@ class Store:
             entries.append(entry)
             atomic_json(self.root / "agents" / agent / "memory.json", entries[-200:])
 
-    def archive(self, run: dict, agent: str, relative: str, task_id: str) -> dict:
+    def archive(self, run: dict, agent: str, relative: str, task_id: str, origin: str = 'archive') -> dict:
         path = safe_path(self.workspace(agent, run["id"]), relative)
         if path.suffix.lower() not in TEXT_EXTENSIONS or not path.is_file():
             raise ValueError("Only regular source/plain-text artifacts can be exported")
@@ -174,7 +176,8 @@ class Store:
         if not blob.exists():
             blob.write_bytes(content)
         entry = {"id": uid("art"), "task_id": task_id, "owner": agent, "path": relative,
-                 "sha256": sha, "bytes": len(content), "verification": "unverified"}
+                 "sha256": sha, "bytes": len(content), "verification": "unverified",
+                 "origin": origin, "created": time.time(), "sequence": len(run["artifacts"]) + 1}
         run["artifacts"].append(entry)
         return entry
 
@@ -204,7 +207,7 @@ class Store:
                     return result
                 try:
                     relative = (Path(directory) / name).relative_to(root).as_posix()
-                    result.append(self.archive(run, task["owner"], relative, task["id"]))
+                    result.append(self.archive(run, task["owner"], relative, task["id"], origin="failure_snapshot"))
                 except (OSError, ValueError, UnicodeError):
                     continue
         return result

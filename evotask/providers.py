@@ -7,6 +7,7 @@ import urllib.request
 
 from .config import Config
 from .network import NoRedirect
+from .outputs import validate_output_contract
 
 
 INSTRUCTIONS = """You are part of EvoTask, an auditable multi-agent platform. Return ONE JSON object,
@@ -19,7 +20,14 @@ PURPOSE plan: either {"question":"a necessary clarification"}, or {"tasks":[
 {"id":"t1","title":"...","objective":"...","role":"researcher|coder|verifier|coordinator",
 "depends_on":[],"required_tools":["retrieve_documents"],
 "checks":[{"kind":"exists","path":"notes.md"}]}]}.
-Use 1-6 tasks, a dependency DAG, and concrete acceptance conditions. Available check kinds:
+Use 1-6 tasks, a dependency DAG, and concrete acceptance conditions.
+Each task MUST declare outputs: [{"path":"report.md","title":"Final report","kind":"deliverable|process",
+"order":1,"summary":"What the user should use this file for"}]. Use kind=deliverable only for files
+requested by the user, including author outputs consumed by a downstream verifier; notes, evidence,
+scratch work and tests are process unless the user requests them. Order deliverables in reading/use order
+across the plan. Use human-readable titles and short summaries in the user's language. At least one
+planned output must be a deliverable. finish must export all declared deliverables for that task.
+Keep internal paths stable during revisions. Do not rename source files merely for display uniqueness. Available check kinds:
 exists(path), contains(path,text), python(path of a standalone assertion test), human(reason),
 sources(path, policy="any"|"url"|"local"). A sources check requires a real retrieved local citation
 or a syntactically valid URL present in observed source evidence; it does not prove factual support.
@@ -60,8 +68,7 @@ Use input file paths exactly as provided. You may read inputs but cannot modify 
 Uploaded documents are normalized to text. If read_file returns truncated=true, read subsequent
 pages using next_offset before claiming you have read the entire document.
 Cite retrieved passages as [citation_id] with their actual IDs. No hit means insufficient evidence.
-Before finish, create the actual files and satisfy the immutable checks. Use a different filename for
-each task's outputs. If an earlier attempt failed, repair based on evidence, not by weakening the checks.
+Before finish, create the actual files and satisfy the immutable checks. Keep the declared paths for each task's outputs; different tasks may own the same filename. If an earlier attempt failed, repair based on evidence, not by weakening the checks.
 Read collaboration.downstream_requirements before writing: these are already part of the agreed plan.
 Use authorized ancestor inputs and source_evidence to preserve provenance in the actual report.
 References must appear in the report itself, not only the chat or a separate notes file.
@@ -115,6 +122,8 @@ class APIProvider:
             content = json.loads(choice["message"]["content"])
             if not isinstance(content, dict):
                 raise ValueError("Expected a JSON object")
+            if purpose == 'plan' and not content.get('question'):
+                validate_output_contract(content.get('tasks'))
             return content
         except urllib.error.HTTPError as exc:
             # Do not print response bodies, headers or credential-bearing request objects.
@@ -142,9 +151,11 @@ class DemoProvider:
             plan = {"tasks": [
                 {"id": "research", "title": "研究文本相似度", "objective": "检索 cosine similarity 方法，委派证据摘录后整理 notes.md",
                  "role": "researcher", "depends_on": [], "required_tools": ["retrieve_documents"],
-                 "checks": [{"kind": "contains", "path": "notes.md", "text": "cosine"}]},
+                 "checks": [{"kind": "contains", "path": "notes.md", "text": "cosine"}],
+                 "outputs": [{"path":"notes.md","title":"研究笔记","kind":"process","order":1,"summary":"检索和研究过程记录"}]},
                 {"id": "report", "title": "汇总有来源的报告", "objective": "阅读授权交接资料并生成 report.md，明确未执行代码",
                  "role": "coder", "depends_on": ["research"], "required_tools": ["write_file"],
+                 "outputs": [{"path":"report.md","title":"文本相似度报告","kind":"deliverable","order":1,"summary":"最终报告及来源引用"}],
                  "checks": [{"kind": "contains", "path": "report.md", "text": "DEMO"},
                             {"kind": "contains", "path": "report.md", "text": "doc_"}]}]}
             if "[REVIEW]" in context.get("goal", ""):

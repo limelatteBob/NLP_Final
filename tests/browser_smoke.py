@@ -33,12 +33,13 @@ def main():
         run_url = page.url
         page.reload()
         expect(page.get_by_role('button', name='确认通过')).to_be_visible()
-        page.locator('.artifact-name').filter(has_text='report.md').click()
+        page.locator('.artifact-name').filter(has_text='文本相似度报告').click()
         expect(page.locator('#modal .markdown')).to_contain_text('DEMO')
         expect(page.locator('#modal .markdown')).to_contain_text('doc_')
         with page.expect_download() as download:
-            page.get_by_role('link', name='下载原文件').click()
-        assert download.value.suggested_filename == 'report.md'
+            page.get_by_role('link', name='下载文件').click()
+        assert download.value.suggested_filename.endswith('.md')
+        assert '文本相似度报告' in download.value.suggested_filename
         page.get_by_role('button', name='关闭', exact=True).click()
         page.screenshot(path=str(output / 'desktop-review.png'), full_page=True, animations='disabled')
         page.get_by_role('button', name='确认通过').click()

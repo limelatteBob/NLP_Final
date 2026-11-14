@@ -1,5 +1,6 @@
 import { icon } from './icons.js';
 import { accountUI } from './account.js';
+import { updateNetwork, destroyNetwork, setNetworkConnected } from './network.js';
 import { esc, roles, agentIcon, brand, date, seconds, badge, empty, loading, graph, runsTable, timeline, tasks, markdown } from './components.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -15,7 +16,7 @@ const state = {
   user: null, identityEpoch: 0,
   mode: localStorage.getItem('evotask-mode') === 'live' ? 'live' : 'demo', csrf: '',
   workspace: { runs: [], documents: 0, agents: [], job: {} }, route: 'home', run: null, events: [],
-  docs: [], bases: [], baseId: 'kb_default', selectedBases: null, channel: 'group', messages: [], sending: false, files: [], goal: '', memory: true, review: true,
+  docs: [], bases: [], baseId: 'kb_default', selectedBases: null, channel: 'group', chatRun: '', messages: [], sending: false, files: [], goal: '', memory: true, review: true,
   filter: 'all', query: '', verbose: false, stream: null, generation: 0, initialized: false,
 };
 
@@ -46,11 +47,12 @@ let sessionReset = null;
 async function changeSession(notify = true) {
   if (sessionReset) return sessionReset;
   sessionReset = (async () => {
+    destroyNetwork($('#collaboration-network'));
     state.stream?.close(); state.stream = null; ++state.generation; ++state.identityEpoch;
     activeUploads.forEach(request => request.abort());
     state.initialized = false; closeModal(); pendingDocumentFiles = [];
     Object.assign(state, { user: null, run: null, events: [], docs: [], bases: [], baseId: 'kb_default', selectedBases: null,
-      files: [], messages: [], goal: '', query: '', filter: 'all', channel: 'group', sending: false,
+      files: [], messages: [], goal: '', query: '', filter: 'all', channel: 'group', chatRun: '', sending: false,
       workspace: { runs: [], agents: [], documents: 0, job: {} } });
     history.replaceState(null, '', location.hash === '#knowledge' ? '#knowledge' : '#home');
     app.innerHTML = loading();
@@ -139,19 +141,58 @@ function errorDetail(message) {
   return message;
 }
 
-function detailPage() {
+function artifactPanels(run) {
+  const groups = run.artifact_groups || {unknown: run.artifacts};
+  const names = {deliverable: '交付文件', process: '过程资料', history: '历史版本', unknown: '历史文件／用途未确认'};
+  return Object.entries(names).map(([kind, title]) => {
+    const files = groups[kind] || [];
+    if (!files.length && kind !== 'deliverable') return '';
+    const rows = files.map(a => `<div class="artifact-item" data-artifact-id="${esc(a.id)}">${icon('file')}<button class="artifact-name" data-action="artifact" data-id="${esc(a.id)}"><strong>${esc(a.display_name || a.path)}</strong><small>${esc(a.summary || '')}</small><small>原文件：${esc(a.path)} · ${esc(a.task_title || a.task_id)}</small><small>${esc(a.status_label || '用途未确认')} · ${fileSize(a.bytes)}</small><small>${kind === 'deliverable' ? `交付顺序 ${a.delivery_order} · ` : ''}生成时间：${a.created ? date(a.created) : '时间未知'}</small></button><a class="icon-btn" href="${apiPath(`/api/runs/${run.id}/artifacts/${a.id}?download=true`)}" download aria-label="下载 ${esc(a.display_name || a.path)}">${icon('download')}</a></div>`).join('');
+    const body = `<div class="artifact-list">${rows || '<div class="artifact-empty">尚无已声明的交付文件；其他文件可在下方查看。</div>'}</div>`;
+    if (kind === 'deliverable') return `<section class="panel" data-artifact-group="deliverable"><div class="panel-header"><span>${icon('file')}${title}</span><small>${files.length} FILES</small></div>${body}</section>`;
+    return `<details class="panel artifact-section" data-artifact-section="${kind}" data-artifact-group="${kind}"><summary class="panel-header"><span>${icon('arrow', 'artifact-toggle')}${title}</span><small>${files.length} FILES</small></summary>${body}</details>`;
+  }).join('');
+}
+
+function retryLinks(run) {
+  const links = [];
+  if (run.retry_of) links.push(`<a class="text-link" href="#task/${esc(run.retry_of)}">查看原失败任务</a>`);
+  for (const id of run.retry_children || []) links.push(`<a class="text-link" href="#task/${esc(id)}">查看重新运行的任务 ${esc(id.slice(-6))}</a>`);
+  return links.length ? `<div class="retry-links">${links.join(' · ')}</div>` : '';
+}
+
+const retryingRuns = new Set();
+
+function detailPage(live = false) {
   const run = state.run;
   if (!run) return;
   const focused = document.activeElement?.id;
   const reply = $('#human-reply')?.value || '';
   const openTasks = $$('details.task-item[open]').map(el => el.dataset.task);
   const openEvents = $$('details[data-event][open]').map(el => el.dataset.event);
+  const openArtifacts = $('#main').dataset.artifactRun === run.id ? $$('details[data-artifact-section][open]').map(el => el.dataset.artifactSection) : [];
   const timelineScroll = $('.timeline')?.scrollTop || 0;
   const terminal = ['succeeded', 'failed', 'cancelled'].includes(run.status);
   const approvals = run.pending && ['acceptance', 'tool_approval'].includes(run.pending.kind);
   const review = run.pending ? `<section class="review-card"><div class="review-title">${icon('shield')}这里，需要你的判断</div><p>${esc(run.pending.question)}</p>${run.pending.prepared ? `<details><summary>查看操作对象、版本与范围</summary><pre>${esc(JSON.stringify(run.pending.prepared, null, 2))}</pre></details>` : ''}${approvals ? `<div class="review-buttons"><button class="btn primary small" data-action="approve" data-reply="yes" ${run.executing ? 'disabled' : ''}>${icon('check')}确认通过</button><button class="btn secondary small" data-action="approve" data-reply="no" ${run.executing ? 'disabled' : ''}>暂不接受</button></div>` : `<form id="reply-form"><label class="sr-only" for="human-reply">补充信息</label><textarea id="human-reply" maxlength="8000" required placeholder="补充说明，让团队继续…">${esc(reply)}</textarea><button class="btn primary small" type="submit" ${run.executing ? 'disabled' : ''}>提交并继续 ${icon('arrow')}</button></form>`}</section>` : '';
-  $('#main').innerHTML = `<div class="page task-page"><a class="text-link" href="#runs">← 返回任务记录</a><div class="detail-heading"><div><div class="detail-meta">${badge(run.status)}<span class="pill">${run.mode === 'demo' ? 'DEMO · 无真实模型调用' : 'LIVE · 真实模型'}</span></div><h1>${esc(run.goal)}</h1><div class="detail-meta"><span class="mono">${esc(run.id)}</span><span>${date(run.created, true)}</span><span>经验记忆${run.memory_enabled ? '已开启' : '已关闭'}</span></div></div><div class="detail-actions"><a class="btn secondary small" href="${apiPath(`/api/runs/${run.id}/report`)}" download>${icon('download')}导出记录</a>${run.can_retry_actions ? '<button class="btn primary small" data-action="retry-actions">继续失败任务</button>' : ''}${run.can_repair ? '<button class="btn primary small" data-action="repair-run">修复并复验</button>' : ''}${!terminal && !run.pending && !run.executing ? '<button class="btn primary small" data-action="continue">继续任务</button>' : ''}${!terminal ? `<button class="btn secondary small" data-action="cancel" ${run.cancelling ? 'disabled' : ''}>${icon('stop')}${run.cancelling ? '正在停止…' : '停止'}</button>` : ''}</div></div>${run.failure ? `<div class="notice error run-message">${icon('info')}<p>${esc(errorDetail(run.failure))}</p></div>` : ''}${run.mode === 'demo' ? '<div class="notice run-message">离线演示采用固定的模型决策；检索、文件交接、归档与验收均实际执行。演示结果不代表真实模型性能。</div>' : ''}<div class="detail-grid"><div class="detail-main">${review}${revisionPanel(run)}${sourceFiles(run)}<section class="panel"><div class="metric-bar"><div class="metric"><strong>${run.completed_tasks}<span class="metric-slash">/ ${run.task_count}</span></strong><span>子任务完成</span></div><div class="metric"><strong>${run.artifact_count}</strong><span>交付产物</span></div><div class="metric"><strong>${seconds(run.active_seconds)}</strong><span>累计活跃执行</span></div><div class="metric"><strong>${run.model_calls}</strong><span>${run.mode === 'demo' ? '模拟决策次数' : '模型请求次数'}</span></div></div><div id="task-list">${tasks(run)}</div><div class="detail-tab-note">验收范围为任务声明的检查项；代码测试结果与引用的事实准确性需要分别审阅。</div></section><section class="panel"><div class="panel-header"><span>${icon('activity')}协作轨迹</span><button class="text-link" data-action="verbose">${state.verbose ? '显示关键事件' : '包含全部决策'}</button></div><div id="timeline">${timeline(state.events, state.verbose)}</div></section></div><aside class="detail-side">${graph(run)}<section class="panel"><div class="panel-header"><span>${icon('file')}交付产物</span><small>${run.artifact_count} FILES</small></div><div class="artifact-list">${run.artifacts.length ? run.artifacts.map(artifact => `<div class="artifact-item">${icon('file')}<button class="artifact-name" data-action="artifact" data-id="${esc(artifact.id)}"><strong>${esc(artifact.path)}</strong><small>${artifact.verification === 'verified' ? '已通过声明的检查' : artifact.verification === 'superseded' ? '历史版本 · 已被修订替代' : '尚未验收'} · ${Math.max(1, Math.ceil(artifact.bytes / 1024))} KB</small></button><a class="icon-btn" href="${apiPath(`/api/runs/${run.id}/artifacts/${artifact.id}?download=true`)}" download aria-label="下载 ${esc(artifact.path)}">${icon('download')}</a></div>`).join('') : '<div class="artifact-empty">团队完成产出后，文件将出现在这里。</div>'}</div></section></aside></div><div class="stream-status" id="stream-status"><i class="dot"></i>${run.executing ? '正在同步执行状态' : run.pending ? '已暂停，等待你的回复' : terminal ? '记录已保存' : '执行已中断，可继续任务'}</div>${footer()}</div>`;
+  const markup = `<div class="page task-page" data-run-id="${esc(run.id)}"><div id="task-heading"><a class="text-link" href="#runs">← 返回任务记录</a><div class="detail-heading"><div><div class="detail-meta">${badge(run.status)}<span class="pill">${run.mode === 'demo' ? 'DEMO · 无真实模型调用' : 'LIVE · 真实模型'}</span></div><h1>${esc(run.goal)}</h1><div class="detail-meta"><span class="mono">${esc(run.id)}</span><span>${date(run.created, true)}</span><span>经验记忆${run.memory_enabled ? '已开启' : '已关闭'}</span></div></div><div class="detail-actions">${run.can_retry ? `<button class="btn primary small" data-action="retry-run" data-retry-id="${esc(run.id)}" ${retryingRuns.has(run.id) ? 'disabled' : ''}>${retryingRuns.has(run.id) ? '重新运行中…' : '重新运行'}</button>` : ''}<a class="btn secondary small" href="${apiPath(`/api/runs/${run.id}/report`)}" download>${icon('download')}导出记录</a>${run.can_retry_actions ? '<button class="btn secondary small" data-action="retry-actions">继续失败任务</button>' : ''}${run.can_repair ? '<button class="btn secondary small" data-action="repair-run">修复并复验</button>' : ''}${!terminal && !run.pending && !run.executing ? '<button class="btn primary small" data-action="continue">继续任务</button>' : ''}${!terminal ? `<button class="btn secondary small" data-action="cancel" ${run.cancelling ? 'disabled' : ''}>${icon('stop')}${run.cancelling ? '正在停止…' : '停止'}</button>` : ''}</div></div>${run.failure ? `<div class="notice error run-message">${icon('info')}<p>${esc(errorDetail(run.failure))}</p></div>` : ''}${run.mode === 'demo' ? '<div class="notice run-message">离线演示采用固定的模型决策；检索、文件交接、归档与验收均实际执行。演示结果不代表真实模型性能。</div>' : ''}</div><div class="detail-grid"><div class="detail-main">${retryLinks(run)}${review}${revisionPanel(run)}${sourceFiles(run)}<section class="panel"><div class="metric-bar"><div class="metric"><strong>${run.completed_tasks}<span class="metric-slash">/ ${run.task_count}</span></strong><span>子任务完成</span></div><div class="metric"><strong>${run.deliverable_count ?? 0}</strong><span>交付文件</span></div><div class="metric"><strong>${seconds(run.active_seconds)}</strong><span>累计活跃执行</span></div><div class="metric"><strong>${run.model_calls}</strong><span>${run.mode === 'demo' ? '模拟决策次数' : '模型请求次数'}</span></div></div><div id="task-list">${tasks(run)}</div><div class="detail-tab-note">验收范围为任务声明的检查项；代码测试结果与引用的事实准确性需要分别审阅。</div></section><section class="panel"><div class="panel-header"><span>${icon('activity')}协作轨迹</span><button class="text-link" data-action="verbose">${state.verbose ? '显示关键事件' : '包含全部决策'}</button></div><div id="timeline">${timeline(state.events, state.verbose)}</div></section></div><aside class="detail-side"><section id="collaboration-network"></section><div id="artifact-panels">${artifactPanels(run)}</div></aside></div><div class="stream-status" id="stream-status"><i class="dot"></i>${run.executing ? '正在同步执行状态' : run.pending ? '已暂停，等待你的回复' : terminal ? '记录已保存' : '执行已中断，可继续任务'}</div>${footer()}</div>`;
+  const current = $('.task-page');
+  if (current?.dataset.runId === run.id && $('#collaboration-network')) {
+    // Keep the network and its ancestors connected: SSE must not restart node animations.
+    const next = document.createElement('template'); next.innerHTML = markup;
+    for (const selector of ['#task-heading', '.detail-main', '#artifact-panels']) {
+      const target = $(selector, current), replacement = next.content.querySelector(selector);
+      target.replaceChildren(...replacement.childNodes);
+    }
+    $('#stream-status').replaceChildren(...next.content.querySelector('#stream-status').childNodes);
+  } else {
+    destroyNetwork($('#collaboration-network'));
+    $('#main').innerHTML = markup;
+  }
+  updateNetwork($('#collaboration-network'), run, state.events, {live});
   openTasks.forEach(id => { const item = $$('details.task-item').find(el => el.dataset.task === id); if (item) item.open = true; });
+  $('#main').dataset.artifactRun = run.id;
+  openArtifacts.forEach(id => { const item = $$('details[data-artifact-section]').find(el => el.dataset.artifactSection === id); if (item) item.open = true; });
   openEvents.forEach(id => { const item = $$('details[data-event]').find(el => el.dataset.event === id); if (item) item.open = true; });
   if ($('.timeline')) $('.timeline').scrollTop = timelineScroll;
   if (focused === 'human-reply') { $('#human-reply')?.focus({ preventScroll: true }); }
@@ -168,7 +209,8 @@ function connectRun(runId, generation) {
     state.run = snapshot.run;
     const seen = new Set(state.events.map(e => e.seq));
     state.events.push(...snapshot.events.filter(e => !seen.has(e.seq)));
-    detailPage();
+    setNetworkConnected($('#collaboration-network'), true);
+    detailPage(true);
   });
   source.addEventListener('idle', () => {
     source.close();
@@ -176,6 +218,7 @@ function connectRun(runId, generation) {
   });
   source.addEventListener('expired', () => { source.close(); changeSession(false); });
   source.onerror = () => {
+    if (generation === state.generation) setNetworkConnected($('#collaboration-network'), false);
     if (generation === state.generation && $('#stream-status')) $('#stream-status').textContent = '连接暂时中断，正在重新连接…';
   };
 }
@@ -220,12 +263,69 @@ async function documentSettings(id) {
   openModal('编辑资料 · ' + doc.name, `<form id="document-settings-form" data-id="${esc(id)}" data-revision="${esc(doc.revision)}">${documentFields(doc)}${doc.can_edit_text ? `<label class="field"><span>正文（保存后重新索引）</span><textarea id="edit-document-content" rows="10">${esc(doc.text)}</textarea></label>` : `<details class="document-preview"><summary>查看正文预览${doc.truncated ? '（部分内容）' : ''}</summary><pre>${esc(doc.text || doc.detail || '暂无正文')}</pre></details><p class="subtext">此文档可编辑说明、来源及访问范围；更新完整正文请重新上传原文件。</p>`}<div class="modal-actions"><button type="button" class="btn secondary" data-action="close-modal">取消</button><button type="submit" class="btn primary">保存资料</button></div></form>`);
 }
 
+function chatPath(channel = state.channel) {
+  return `/api/chat?channel=${channel}${channel === 'group' && state.chatRun ? `&run_id=${encodeURIComponent(state.chatRun)}` : ''}`;
+}
+function chatName(agent) {
+  const role = roles[agent];
+  return role ? `${role.name}${role.label && agent !== 'group' ? ` · ${role.label}` : ''}` : agent;
+}
+function chatRunOptions() {
+  return '<option value="">全部任务与对话</option>' + state.workspace.runs.map(run => `<option value="${esc(run.id)}" ${state.chatRun === run.id ? 'selected' : ''}>${esc(run.goal.slice(0, 70))} · ${date(run.created)}</option>`).join('');
+}
 function chatPage() {
-  $('#main').innerHTML = `<div class="page"><div class="page-title"><div><div class="eyebrow">A CONVERSATION STARTS SOMETHING</div><h1>和你的团队，聊一聊。</h1><p>共同讨论想法，也可以与任意一位 Agent 单独交流。</p></div></div><section class="panel chat-layout"><aside class="chat-channels"><h3>CONVERSATIONS</h3>${['group', 'coordinator', 'researcher', 'coder', 'verifier'].map(a => `<button class="channel-button ${state.channel === a ? 'active' : ''}" data-action="channel" data-channel="${a}">${agentIcon(a)}<span><strong>${roles[a].name}</strong><small>${a === 'group' ? '协调 Agent 回应' : '私密对话'}</small></span></button>`).join('')}</aside><div class="chat-room"><div class="chat-room-header"><strong>${roles[state.channel].name}</strong><small>${state.channel === 'group' ? '团队共享频道' : '仅当前 Agent 可读取'} · ${state.mode === 'demo' ? 'DEMO' : 'LIVE'}</small></div><div class="chat-messages" id="chat-messages" aria-live="polite">${chatMessages()}</div><form class="chat-composer" id="chat-form"><label class="sr-only" for="chat-input">消息</label><textarea id="chat-input" placeholder="说说你的想法…" maxlength="8000" required ${state.sending ? 'disabled' : ''}></textarea><button type="submit" class="btn primary" aria-label="发送消息" ${state.sending ? 'disabled' : ''}>${state.sending ? '<span class="spinner"></span>' : icon('arrow')}</button></form><p class="chat-hint">${state.mode === 'demo' ? '离线回复为固定示例，不调用模型。' : '此处为纯对话，不执行工具。'} 需要执行任务，请回到工作台。 · Ctrl + Enter 发送</p></div></section>${footer()}</div>`;
-  const messages = $('#chat-messages'); messages.scrollTop = messages.scrollHeight;
+  const filtered = state.channel === 'group' && !!state.chatRun;
+  $('#main').innerHTML = `<div class="page chat-page">
+    <div class="page-title"><div><div class="eyebrow">TEAM CONVERSATIONS</div><h1>和你的团队，聊一聊。</h1><p>跟进任务分工、资料交接与验证反馈，也可以单独与 Agent 交流。</p></div></div>
+    <section class="panel chat-layout">
+      <aside class="chat-channels" aria-label="会话列表"><h3>团队会话</h3>${['group', 'coordinator', 'researcher', 'coder', 'verifier'].map(a => `
+        <button class="channel-button ${state.channel === a ? 'active' : ''}" data-action="channel" data-channel="${a}" aria-pressed="${state.channel === a}">
+          ${agentIcon(a)}<span><strong>${roles[a].name}</strong><small>${a === 'group' ? '任务动态与共同讨论' : roles[a].label + ' · 私聊'}</small></span>
+        </button>`).join('')}</aside>
+      <div class="chat-room">
+        <div class="chat-room-header"><div><strong>${esc(chatName(state.channel))}</strong><small>${state.channel === 'group' ? '4 位 Agent · 协作动态来自实际任务记录' : '仅你与当前 Agent 可见'} · ${state.mode === 'demo' ? 'DEMO' : 'LIVE'}</small></div><span class="chat-status">自动同步</span></div>
+        ${state.channel === 'group' ? `<div class="chat-filter"><label for="chat-run-filter">查看</label><select id="chat-run-filter">${chatRunOptions()}</select><span>最近 200 条</span></div>` : ''}
+        <div class="chat-feed"><div class="chat-messages" id="chat-messages" role="log" aria-label="对话消息" aria-live="polite" aria-relevant="additions"></div><button class="chat-new-message" data-action="chat-bottom" hidden>查看新消息 ↓</button></div>
+        <form class="chat-composer" id="chat-form"><label class="sr-only" for="chat-input">消息</label><textarea id="chat-input" placeholder="${filtered ? '切换到全部任务与对话后发言' : '输入消息，与团队交流…'}" maxlength="8000" required ${state.sending || filtered ? 'disabled' : ''}></textarea><div class="chat-compose-actions"><span>Ctrl + Enter 发送</span><button type="submit" class="btn primary" aria-label="发送消息" ${state.sending || filtered ? 'disabled' : ''}>${state.sending ? '<span class="spinner"></span>' : '发送'}</button></div></form>
+        <p class="chat-hint">${filtered ? '当前显示该任务的协作记录；点击消息下方链接可查看任务详情。' : state.mode === 'demo' ? '离线对话使用固定回复；执行动态来自实际发生的演示任务。' : '群聊由统筹 Agent 回复；分工、接收和交接卡片由执行记录生成。'} ${filtered ? '' : '新任务请从工作台发起。'}</p>
+      </div>
+    </section>${footer()}</div>`;
+  renderChatMessages(true);
 }
 function chatMessages() {
-  return state.messages.length ? state.messages.map(message => `<div class="message ${message.sender === 'human' ? 'human' : ''}">${agentIcon(message.sender)}<div class="message-body"><small>${roles[message.sender]?.name || esc(message.sender)}</small><div>${esc(message.body)}</div></div>`).join('') : empty(`你好，${state.channel === 'group' ? '团队' : roles[state.channel].name}已就位`, '讨论一个研究方向，确认一个实现思路，或者从一句「你好」开始。', 'chat');
+  if (!state.messages.length) return empty(state.channel === 'group' ? '团队已就位' : `${roles[state.channel].name} 已就位`, state.chatRun && state.channel === 'group' ? '该任务暂时没有协作记录。' : '发起任务后，这里将显示分工、接收、交接与完成反馈。也可以先发送一条消息。', 'chat');
+  let lastDay = '';
+  return state.messages.map((message, index) => {
+    const stamp = message.created ? new Date(message.created * 1000) : null;
+    const day = stamp ? stamp.toLocaleDateString('zh-CN', {year: 'numeric', month: 'long', day: 'numeric'}) : '时间未知';
+    const separator = day !== lastDay ? `<div class="chat-date">${esc(day)}</div>` : '';
+    lastDay = day;
+    const id = message.id || (message.seq ? `message:${message.seq}` : `pending:${index}`);
+    return `${separator}<article class="message ${message.sender === 'human' ? 'human' : ''} ${message.source === 'execution' ? 'execution-message' : ''}" data-message-id="${esc(id)}" data-message-kind="${esc(message.kind || 'chat')}">
+      ${agentIcon(message.sender)}<div class="message-body">
+        <header class="message-heading"><strong>${esc(chatName(message.sender))}</strong>${message.recipient ? `<span class="message-recipient">→ ${esc(roles[message.recipient]?.name || message.recipient)}</span>` : ''}<time ${stamp ? `datetime="${stamp.toISOString()}" title="${esc(stamp.toLocaleString('zh-CN'))}"` : ''}>${stamp ? stamp.toLocaleTimeString('zh-CN', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}) : '时间未知'}</time></header>
+        <div class="message-bubble">${message.label ? `<span class="message-kind">${esc(message.label)}</span>` : ''}<p>${esc(message.body)}</p>${message.pending ? '<small>正在发送…</small>' : ''}</div>
+        ${message.run_id ? `<a class="chat-run-link" href="#task/${esc(message.run_id)}" title="${esc(message.run_goal)}">${icon('file')}查看任务 · ${esc(message.run_goal.slice(0, 55))}</a>` : ''}
+      </div></article>`;
+  }).join('');
+}
+function renderChatMessages(forceBottom = false) {
+  const list = $('#chat-messages');
+  if (!list) return;
+  const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 70;
+  const previousTop = list.scrollTop;
+  const previousIds = new Set($$('[data-message-id]', list).map(el => el.dataset.messageId));
+  const anchor = $$('[data-message-id]', list).find(el => el.getBoundingClientRect().bottom >= list.getBoundingClientRect().top);
+  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - list.getBoundingClientRect().top : 0;
+  const anchorId = anchor?.dataset.messageId;
+  list.innerHTML = chatMessages();
+  const button = $('.chat-new-message');
+  if (forceBottom || nearBottom) { list.scrollTop = list.scrollHeight; button.hidden = true; }
+  else {
+    const replacement = $$('[data-message-id]', list).find(el => el.dataset.messageId === anchorId);
+    list.scrollTop = replacement ? list.scrollTop + replacement.getBoundingClientRect().top - list.getBoundingClientRect().top - anchorOffset : previousTop;
+    if ($$('[data-message-id]', list).some(el => !previousIds.has(el.dataset.messageId))) button.hidden = false;
+  }
 }
 
 function systemPage(info) {
@@ -239,7 +339,10 @@ async function refreshWorkspace() {
   const data = await api('/api/workspace');
   if (mode !== state.mode || epoch !== state.identityEpoch) return;
   const previousBases = JSON.stringify(state.bases);
+  const previousRuns = JSON.stringify(state.workspace.runs.map(r => [r.id, r.goal]));
   state.workspace = data; state.bases = data.knowledge_bases || [];
+  const chatFilter = $('#chat-run-filter');
+  if (chatFilter && previousRuns !== JSON.stringify(data.runs.map(r => [r.id, r.goal]))) chatFilter.innerHTML = chatRunOptions();
   if (state.selectedBases !== null) state.selectedBases = state.selectedBases.filter(id => state.bases.some(base => base.id === id));
   const selector = $('.task-knowledge');
   if (selector && previousBases !== JSON.stringify(state.bases)) {
@@ -252,6 +355,7 @@ async function refreshWorkspace() {
 }
 
 async function route() {
+  destroyNetwork($('#collaboration-network'));
   const generation = ++state.generation;
   state.stream?.close(); state.stream = null;
   const [name = 'home', id] = location.hash.replace(/^#/, '').split('/');
@@ -273,7 +377,9 @@ async function route() {
       const docs = await api('/api/knowledge'); if (generation !== state.generation) return;
       state.docs = docs; await refreshWorkspace(); knowledgePage();
     } else if (state.route === 'chat') {
-      const messages = await api(`/api/chat?channel=${state.channel}`); if (generation !== state.generation) return;
+      await refreshWorkspace();
+      if (generation !== state.generation) return;
+      const messages = await api(chatPath()); if (generation !== state.generation) return;
       state.messages = messages; chatPage();
     } else if (state.route === 'system') {
       const info = await api('/api/system'); if (generation !== state.generation) return;
@@ -341,7 +447,7 @@ async function refreshRun() {
 
 document.addEventListener('click', async event => {
   const row = event.target.closest('[data-run]');
-  if (row) { location.hash = `task/${row.dataset.run}`; return; }
+  if (row && !event.target.closest('[data-action],a,button')) { location.hash = `task/${row.dataset.run}`; return; }
   const button = event.target.closest('[data-action]');
   if (!button || button.disabled) return;
   const action = button.dataset.action;
@@ -372,6 +478,21 @@ document.addEventListener('click', async event => {
     await refreshWorkspace(); await route(); closeModal();
     toast(result.cleanup_pending ? '知识库资料已移除；部分原件暂时被占用，将在下次知识库管理操作时重试清理。' : `${result.cleared ? '已清空默认知识库' : '已删除知识库'}，移除 ${result.deleted_documents} 份资料。`, !!result.cleanup_pending);
   });
+  if (action === 'retry-run') {
+    const id = button.dataset.retryId || state.run.id;
+    if (retryingRuns.has(id)) return;
+    retryingRuns.add(id);
+    return busy(button, async () => {
+      const storageKey = `evotask-retry:${state.mode}:${id}`;
+      let key = sessionStorage.getItem(storageKey);
+      if (!key) { key = crypto.randomUUID(); sessionStorage.setItem(storageKey, key); }
+      try {
+        const result = await api(`/api/runs/${id}/retry`, {method: 'POST', body: {request_key: key}});
+        sessionStorage.removeItem(storageKey);
+        location.hash = `task/${result.id}`;
+      } finally { retryingRuns.delete(id); }
+    });
+  }
   if (action === 'retry-actions') {
     openModal('继续失败任务', `<p class="subtext">从动作格式错误处继续，保留已完成的上游任务、已有文件及验收条件。任务完成后仍按原要求进行人工审阅${state.mode === 'live' ? '；继续调用真实模型会消耗剩余 API 预算' : ''}。</p><div class="modal-actions"><button class="btn secondary" data-action="close-modal">取消</button><button class="btn primary" data-action="confirm-retry-actions">继续执行</button></div>`); return;
   }
@@ -402,7 +523,7 @@ document.addEventListener('click', async event => {
   if (action === 'artifact') return busy(button, async () => {
     const runId = state.run.id, mode = state.mode;
     const artifact = await api(`/api/runs/${runId}/artifacts/${button.dataset.id}`, { mode });
-    openModal(artifact.path, `<div class="artifact-meta">${artifact.verification === 'verified' ? '已通过声明的检查' : artifact.verification === 'superseded' ? '历史版本 · 已被修订替代' : '未验收 · 请审阅'} · ${artifact.bytes} bytes<br>SHA256 ${esc(artifact.sha256)}</div><div class="markdown">${markdown(artifact.content)}</div><div class="modal-actions"><a class="btn primary" href="${apiPath(`/api/runs/${runId}/artifacts/${artifact.id}?download=true`, mode)}" download>${icon('download')}下载原文件</a></div>`);
+    openModal(artifact.download_name || artifact.path, `<div class="artifact-meta">原文件：${esc(artifact.path)}<br>${esc(artifact.status_label || '')}<br>${artifact.verification === 'verified' ? '已通过声明的检查' : artifact.verification === 'superseded' ? '历史版本 · 已被修订替代' : '未验收 · 请审阅'} · ${artifact.bytes} bytes<br>SHA256 ${esc(artifact.sha256)}</div><div class="markdown">${markdown(artifact.content)}</div>${/\.(py|js|ts|toml)$/i.test(artifact.path) ? '<p class="subtext">下载名称已调整；组合运行代码时请还原原文件名及目录结构。</p>' : ''}<div class="modal-actions"><a class="btn primary" href="${apiPath(`/api/runs/${runId}/artifacts/${artifact.id}?download=true`, mode)}" download>${icon('download')}下载文件</a></div>`);
   });
   if (action === 'approve') return busy(button, async () => { await api(`/api/runs/${state.run.id}/resume`, { method: 'POST', body: { request_id: state.run.pending.id, reply: button.dataset.reply } }); toast(button.dataset.reply === 'yes' ? '已确认，团队将继续执行。' : '已拒绝，结果与原因将保留。'); await refreshRun(); });
   if (action === 'continue') return busy(button, async () => { await api(`/api/runs/${state.run.id}/continue`, { method: 'POST' }); await refreshRun(); });
@@ -412,6 +533,7 @@ document.addEventListener('click', async event => {
     openModal('移除知识文档', `<p class="subtext">将从当前知识库移除「${esc(doc.name)}」。已生成产物和历史引用记录会保留。</p><div class="modal-actions"><button class="btn secondary" data-action="close-modal">取消</button><button class="btn danger" data-action="confirm-delete" data-id="${esc(doc.id)}">${icon('trash')}确认移除</button></div>`); return;
   }
   if (action === 'confirm-delete') return busy(button, async () => { await api(`/api/knowledge/${button.dataset.id}`, { method: 'DELETE' }); closeModal(); state.docs = await api('/api/knowledge'); await refreshWorkspace(); knowledgePage(); toast('文档已从知识库移除。'); });
+  if (action === 'chat-bottom') { const list = $('#chat-messages'); list.scrollTop = list.scrollHeight; button.hidden = true; return; }
   if (action === 'channel') {
     state.channel = button.dataset.channel;
     await route();
@@ -483,14 +605,14 @@ document.addEventListener('submit', async event => {
     if (state.sending) return;
     const message = $('#chat-input').value.trim(); if (!message) return;
     const channel = state.channel, mode = state.mode;
-    state.sending = true; state.messages.push({ sender: 'human', body: message }); chatPage();
+    state.sending = true; state.messages.push({ sender: 'human', body: message, created: Date.now() / 1000, pending: true }); chatPage();
     try {
       await api('/api/chat', { method: 'POST', mode, body: { message, channel } });
     } catch (error) { toast(errorDetail(error.message), true); }
     finally {
       state.sending = false;
       if (state.route === 'chat' && state.channel === channel && state.mode === mode) {
-        try { state.messages = await api(`/api/chat?channel=${channel}`, { mode }); chatPage(); $('#chat-input')?.focus(); }
+        try { state.messages = await api(chatPath(channel), { mode }); chatPage(); $('#chat-input')?.focus(); }
         catch (error) { toast(error.message, true); chatPage(); }
       }
     }
@@ -505,12 +627,14 @@ document.addEventListener('input', event => {
 });
 document.addEventListener('change', async event => {
   const target = event.target;
+  if (target.id === 'chat-run-filter') { state.chatRun = target.value; await route(); return; }
   if (target.id === 'active-base') { state.baseId = target.value; knowledgePage(); }
   if (target.matches('[data-base]')) { state.selectedBases = $$('.task-knowledge [data-base]:checked').map(input => input.dataset.base); $('.task-knowledge summary span').textContent = `${state.selectedBases.length} 个已选`; }
   if (target.id === 'memory-toggle') state.memory = target.checked;
   if (target.id === 'review-toggle') state.review = target.checked;
   if (target.id === 'mode-select') {
     state.stream?.close(); ++state.generation;
+    state.chatRun = ''; state.messages = [];
     state.mode = target.value; localStorage.setItem('evotask-mode', state.mode);
     state.workspace = { runs: [], agents: [], job: {}, documents: 0 }; state.selectedBases = null; state.bases = []; state.baseId = 'kb_default'; state.run = null; state.events = []; state.files = [];
     updateEnvironment();
@@ -587,10 +711,20 @@ setInterval(async () => {
       if (generation !== state.generation || modal.open || busyCount) return;
       if (JSON.stringify(docs) !== JSON.stringify(state.docs) || previousBases !== JSON.stringify(state.bases)) { state.docs = docs; knowledgePage(); }
     }
-    if (state.route === 'chat' && !$('#chat-input')?.value) {
-      const messages = await api(`/api/chat?channel=${state.channel}`);
-      if (generation === state.generation && !state.sending && !$('#chat-input')?.value && JSON.stringify(messages) !== JSON.stringify(state.messages)) { state.messages = messages; chatPage(); }
-    }
   } catch { /* Explicit operations show connection errors; do not flood idle visitors. */ }
 }, 12000);
+let refreshingChat = false;
+setInterval(async () => {
+  if (!state.initialized || state.route !== 'chat' || document.hidden || state.sending || refreshingChat) return;
+  refreshingChat = true;
+  const generation = state.generation, path = chatPath();
+  try {
+    const messages = await api(path);
+    if (generation !== state.generation || state.sending || path !== chatPath()) return;
+    if (JSON.stringify(messages) !== JSON.stringify(state.messages)) { state.messages = messages; renderChatMessages(); }
+    if ($('.chat-status')) $('.chat-status').textContent = '自动同步';
+  } catch {
+    if (generation === state.generation && $('.chat-status')) $('.chat-status').textContent = '正在重连…';
+  } finally { refreshingChat = false; }
+}, 2500);
 start();
