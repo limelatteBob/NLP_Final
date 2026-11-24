@@ -1,0 +1,29 @@
+.team-list { margin-bottom: 24px; }
+.team-links { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px; padding: 18px; }
+.team-link { display: flex; flex-direction: column; gap: 8px; padding: 15px; border: 1px solid var(--border); border-radius: 12px; text-decoration: none; color: inherit; }
+.team-link:hover { background: var(--surface); }
+.team-link small,.team-member small,.team-composer small { color: var(--muted); }
+.team-roster { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:24px; }
+.team-member { padding:18px; overflow-wrap:anywhere; }
+.team-member summary { cursor:pointer; display:flex; flex-direction:column; gap:8px; }
+.team-member p { white-space:pre-wrap; line-height:1.7; font-size:13px; }
+.team-room { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr); gap:22px; align-items:start; }
+.team-room h2 { font-size:16px; margin:0 0 16px; }
+.team-run,.team-conversation,.team-composer { padding:22px; margin-bottom:16px; }
+.team-run h3 { font-size:17px; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
+.team-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+.team-exports { justify-content:flex-end; }
+.team-reply { padding:16px; margin:18px 0; border-color:#c9b2ed; background:#faf7ff; }
+.team-reply p,.team-reply pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.team-artifacts { display:flex; gap:12px; flex-wrap:wrap; padding:14px 0; }
+.team-task-list { font-size:12px; display:grid; gap:10px; }
+.team-task-list p { color:var(--muted); margin:6px 0; white-space:pre-wrap; }
+#team-messages { max-height:520px; overflow:auto; }
+.team-message { border-bottom:1px solid var(--border); padding:12px 0; font-size:13px; overflow-wrap:anywhere; }
+.team-role-field { padding:14px; margin:12px 0; border:1px solid var(--border); border-radius:10px; }
+.team-role-field legend { padding:0 6px; font-size:12px; }
+.team-file-picker { max-height:260px; overflow:auto; margin-bottom:18px; }
+.team-file-picker label { display:flex; gap:10px; padding:10px 0; align-items:flex-start; }
+.team-file-picker small { display:block; color:var(--muted); overflow-wrap:anywhere; }
+@media(max-width:1000px) { .team-room { grid-template-columns:1fr; } .team-roster { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:560px) { .team-roster { grid-template-columns:1fr; } .team-run,.team-conversation,.team-composer { padding:16px; } .team-exports { width:100%; justify-content:flex-start; } }

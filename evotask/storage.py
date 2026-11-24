@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 
 
 AGENTS = ("coordinator", "researcher", "coder", "verifier")
-TEXT_EXTENSIONS = {".md", ".txt", ".py", ".json", ".csv", ".toml"}
+TEXT_EXTENSIONS = {".md", ".txt", ".py", ".json", ".csv", ".toml", ".html", ".css", ".js"}
 
 
 def uid(prefix: str) -> str:
@@ -59,6 +59,7 @@ def safe_path(root: Path, relative: str) -> Path:
 
 class Store:
     def __init__(self, root: Path):
+        self.team_id = None
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.root / "state.sqlite3", timeout=10)
@@ -131,6 +132,7 @@ class Store:
             "SELECT * FROM events WHERE run_id=? ORDER BY seq", (run_id,))]
 
     def message(self, channel: str, sender: str, body: str) -> None:
+        channel = self.scoped_channel(channel)
         with self.db:
             self.db.execute("INSERT INTO messages(channel,sender,body,created) VALUES (?,?,?,?)",
                             (channel, sender, body, time.time()))
@@ -138,9 +140,14 @@ class Store:
     def messages(self, channel: str, reader: str = "human", limit: int = 20, *, metadata: bool = False) -> list[dict]:
         if reader != "human" and channel != "group" and channel != f"private:{reader}":
             raise PermissionError("Private conversation is not visible to this agent")
+<<<<<<< HEAD
         columns = "seq,sender,body,created" if metadata else "sender,body"
         rows = self.db.execute(f"SELECT {columns} FROM messages WHERE channel=? ORDER BY seq DESC LIMIT ?",
                                (channel, limit)).fetchall()
+=======
+        rows = self.db.execute("SELECT sender,body FROM messages WHERE channel=? ORDER BY seq DESC LIMIT ?",
+                               (self.scoped_channel(channel), limit)).fetchall()
+>>>>>>> b8fb6de (增加自定义agent功能)
         return [dict(row) for row in reversed(rows)]
 
     def workspace(self, agent: str, run_id: str) -> Path:
@@ -150,17 +157,29 @@ class Store:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def memory(self, agent: str) -> list[dict]:
+    def bind_team(self, team_id: str | None) -> None:
+        if team_id is not None and not re.fullmatch(r'team_[a-f0-9]{12}', team_id):
+            raise ValueError('Invalid team ID')
+        self.team_id = team_id
+
+    def scoped_channel(self, channel: str) -> str:
+        return f'team:{self.team_id}:{channel}' if self.team_id else channel
+
+    def memory_path(self, agent: str) -> Path:
         if agent not in AGENTS:
             raise ValueError("Unknown agent")
-        path = self.root / "agents" / agent / "memory.json"
+        root = self.root / 'teams' / self.team_id if self.team_id else self.root
+        return root / 'agents' / agent / 'memory.json'
+
+    def memory(self, agent: str) -> list[dict]:
+        path = self.memory_path(agent)
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
     def remember(self, agent: str, entry: dict) -> None:
         entries = self.memory(agent)
         if not any(item["id"] == entry["id"] for item in entries):
             entries.append(entry)
-            atomic_json(self.root / "agents" / agent / "memory.json", entries[-200:])
+            atomic_json(self.memory_path(agent), entries[-200:])
 
     def archive(self, run: dict, agent: str, relative: str, task_id: str, origin: str = 'archive') -> dict:
         path = safe_path(self.workspace(agent, run["id"]), relative)
