@@ -16,3 +16,5 @@ build/
 dist/
 *.egg-info/
 temp_file/
+
+Mid_Test/
