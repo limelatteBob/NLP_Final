@@ -1132,7 +1132,8 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             for run in runs[:30]:
                 card = public_run(run, store, False)
                 card.update(pending=run['pending'], artifacts=run['artifacts'],
-                            tasks=[{k: t[k] for k in ('id', 'title', 'role', 'owner', 'status', 'summary', 'depends_on')} for t in run['tasks']])
+                            tasks=[{k: t[k] for k in ('id', 'title', 'role', 'owner', 'status', 'summary', 'depends_on')}
+                                   | {'artifact_ids': t.get('artifact_ids', [])} for t in run['tasks']])
                 cards.append(card)
             conversation = 'group' if channel == 'group' else 'private:' + channel
             return {'team': team, 'channel': channel, 'messages': team_messages(store, team_id=team_id) if channel == 'group' else store.messages(conversation, limit=100, metadata=True), 'runs': cards,

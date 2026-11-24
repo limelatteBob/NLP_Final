@@ -20,6 +20,22 @@ class WorkflowTests(unittest.TestCase):
   artifact['verification']='verified';self.author['artifact_ids']=[artifact['id']];self.engine.refresh_inputs(self.run,self.qa)
   self.source=self.qa['inputs'][0];(self.qroot/'test.py').write_bytes(b'assert 2+2==5\n')
  def tearDown(self):self.store.close();self.temp.cleanup()
+ def test_human_revision_origin_present_in_first_saved_record_and_event(self):
+  self.engine.wait(self.run,self.qa,'acceptance','请确认',{'type':'finish','artifacts':['test.py']},{'artifacts':[]})
+  snapshots=[];original_save=self.store.save
+  def observe_save(run):
+   original_save(run)
+   if run.get('revisions'):
+    snapshots.append(json.loads(json.dumps(run['revisions'][0])))
+  with patch.object(self.store,'save',side_effect=observe_save), patch.object(self.engine,'advance',side_effect=lambda r:r):
+   result=self.engine.resume(self.run['id'],self.run['pending']['id'],'revise:author|返回值必须为3，请保留原测试。')
+  self.assertTrue(snapshots)
+  for snapshot in snapshots:
+   self.assertEqual(snapshot.get('origin'),'human_quality_feedback')
+  events=[e for e in self.store.events(self.run['id']) if e['kind']=='revision_requested']
+  self.assertTrue(events)
+  self.assertEqual(events[-1]['data']['origin'],'human_quality_feedback')
+  self.assertEqual(result['revision_count'],1)
  def test_binary_archive_plan_rejected_before_execution(self):
   with self.assertRaisesRegex(ValueError,'SQLite .db is runtime only'):validate_contract(validate_plan([spec(path='db.db')],8))
  def test_html_headings_are_structural_and_case_insensitive(self):
