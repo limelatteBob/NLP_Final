@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+from .acceptance import file_manifest
 import shutil
 import subprocess
 import tempfile
@@ -31,7 +33,7 @@ class DockerSandbox:
         except (OSError, subprocess.TimeoutExpired):
             return {"available": False, "reason": "Docker daemon unavailable or timed out"}
 
-    def command(self, root: Path, relative: str, name: str) -> list[str]:
+    def command(self, root: Path, relative: str, name: str, verification: str | None = None) -> list[str]:
         safe_path(root, relative)
         user = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") and os.getuid() else "65534:65534"
         # Container-side deadline also applies if the CLI process disappears.
@@ -45,9 +47,36 @@ class DockerSandbox:
                 "--mount", f"type=bind,source={root.resolve()},target=/work"]
         if (root / "inputs").is_dir():
             command.extend(["--mount", f"type=bind,source={(root / 'inputs').resolve()},target=/work/inputs,readonly"])
+        if verification:
+            command.extend(["--mount", f"type=bind,source={Path(__file__).with_name('verification_runner.py').resolve()},target=/controller/verification_runner.py,readonly"])
+            return command + [self.config.docker_image, "python", "-I", "/controller/verification_runner.py", relative.replace("\\", "/"), verification]
         return command + [self.config.docker_image, "python", "-I", "-c", wrapper, relative.replace("\\", "/")]
 
+    def verify(self, root: Path, relative: str) -> dict:
+        token = uuid.uuid4().hex
+        # Snapshot BEFORE execution; bind all observed files to exactly those bytes.
+        before = {p.relative_to(root).as_posix(): p for p in root.rglob('*') if p.is_file() and not p.is_symlink()}
+        hashes = file_manifest(root, before)
+        result = self._execute(root, relative, token)
+        marker = 'EVOTASK_VERIFICATION_' + token + ':'
+        records = [line[len(marker):] for line in result['output'].splitlines() if line.startswith(marker)]
+        evidence = json.loads(records[-1]) if records else {'executed': 0, 'failures': [{'type':'MissingTestEvidence'}]}
+        observed = set(evidence.get('reads', [])) | {relative}
+        evidence['manifest'] = {p: hashes[p] for p in sorted(observed) if p in hashes}
+        evidence['created_during_test'] = sorted(observed - hashes.keys())
+        evidence['changed'] = [p for p, h in evidence['manifest'].items() if not safe_path(root,p).is_file() or file_manifest(root,[p])[p] != h]
+        evidence['command'] = ['python','-I','/controller/verification_runner.py',relative]
+        evidence['image'] = self.config.docker_image
+        result['verification'] = evidence
+        result['success'] = bool(result['success'] and evidence.get('executed',0) > 0 and not evidence.get('exit_code') and not evidence['changed'])
+        if not result['success'] and not records:
+            result['output'] += '\nNoTestsExecuted: controller did not receive execution evidence'
+        return result
+
     def execute(self, root: Path, relative: str) -> dict:
+        return self._execute(root, relative)
+
+    def _execute(self, root: Path, relative: str, verification: str | None = None) -> dict:
         path = safe_path(root, relative)
         if not path.is_file() or path.suffix != ".py":
             raise ValueError("Execution requires an existing workspace .py file")
@@ -61,7 +90,7 @@ class DockerSandbox:
         started = time.monotonic()
         reason = None
         with tempfile.TemporaryFile() as output:
-            process = subprocess.Popen(self.command(root, relative, name), stdout=output, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(self.command(root, relative, name, verification), stdout=output, stderr=subprocess.STDOUT)
             try:
                 while process.poll() is None:
                     if time.monotonic() - started > self.config.tool_timeout + 10:

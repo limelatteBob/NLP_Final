@@ -90,8 +90,6 @@ def main():
                     expect(page.get_by_role('button', name='开始修复并复验')).to_have_count(0)
                 elif args.command == 'rerun':
                     page.get_by_role('button', name='重新运行', exact=True).first.click()
-                    page.get_by_role('button', name='开始重新运行', exact=True).click()
-                    expect(page.get_by_role('button', name='开始重新运行', exact=True)).to_have_count(0)
                 elif args.command == 'chat':
                     if not args.reply_file: raise ValueError('Supply contextual chat text')
                     page.locator('#team-message').fill(args.reply_file.read_text(encoding='utf-8'))

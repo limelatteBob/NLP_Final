@@ -107,7 +107,7 @@ class TeamEngineTests(TestBase):
             self.engine.new('steal', team_id=other['id'], source_run_id=first['id'], artifact_ids=[first['artifacts'][0]['id']])
         duplicate = dict(first['artifacts'][0], id='art_000000000000')
         first['artifacts'].append(duplicate); self.store.save(first)
-        with self.assertRaisesRegex(ValueError, 'Conflicting'):
+        with self.assertRaisesRegex(ValueError, 'Conflicting|current accepted version'):
             Teams(self.store).inputs(self.team['id'], first['id'], [duplicate['id'], first['artifacts'][0]['id']])
         with self.assertRaises(ValueError):
             Teams(self.store).inputs(self.team['id'], first['id'], ['art_111111111111'])

@@ -8,7 +8,16 @@ from pathlib import Path
 
 from evotask.collaboration import normalize_action
 from evotask.config import Config
-from evotask.engine import Engine, task_from_spec
+from evotask.engine import Engine as CurrentEngine, task_from_spec
+
+class Engine(CurrentEngine):
+    '''Existing archived-run regression fixtures use the original execution contract.'''
+    def new(self, *args, **kwargs):
+        run = super().new(*args, **kwargs)
+        run.pop('execution_schema', None)
+        self.store.save(run)
+        return run
+
 from evotask.retrieval import KnowledgeBase
 from evotask.sandbox import DockerSandbox
 from evotask.storage import Store, digest

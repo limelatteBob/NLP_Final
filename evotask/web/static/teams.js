@@ -16,8 +16,8 @@ export function teamUI({ state, api, apiPath, openModal, closeModal, toast, busy
   function pending(run) {
     const p = run.pending;
     if (!p) return '';
-    const approval = ['tool_approval', 'acceptance'].includes(p.kind);
-    return `<form class="team-reply panel" data-team-reply="${esc(run.id)}" data-request="${esc(p.id)}"><strong>${approval ? '等待确认' : '等你回答'}</strong><p>${esc(p.question)}</p>${p.prepared ? `<details><summary>查看文件、操作与验收要求</summary><pre>${esc(JSON.stringify(p.prepared, null, 2))}</pre></details>` : ''}${approval ? '<div class="team-actions"><button class="btn primary small" name="reply" value="yes">确认通过</button><button class="btn secondary small" name="reply" value="no">拒绝</button></div>' : `${questionOptions(p)}<label class="field"><span>也可填写简短回答</span><textarea name="reply" rows="2" maxlength="8000" placeholder="一句话即可…" required></textarea></label><button class="btn primary small" type="submit">回复并继续</button>`}</form>`;
+    const approval = ['tool_approval', 'acceptance', 'test_revision', 'check_revision'].includes(p.kind);
+    return `<form class="team-reply panel" data-team-reply="${esc(run.id)}" data-request="${esc(p.id)}"><strong>${approval ? '等待确认' : '等你回答'}</strong><p>${esc(p.question)}</p>${p.prepared ? `<details><summary>查看文件、操作与验收要求</summary><pre>${esc(JSON.stringify(p.prepared, null, 2))}</pre></details>` : ''}${approval ? '<div class="team-actions"><button class="btn primary small" name="reply" value="yes">确认通过</button><button class="btn secondary small" name="reply" value="no">拒绝</button></div>' : `${questionOptions(p)}<label class="field"><span>也可填写简短回答</span><textarea name="reply" rows="2" maxlength="8000" placeholder="一句话即可…" required></textarea></label><button class="btn primary small" type="submit">回复并继续</button>`}${['acceptance','test_revision','check_revision'].includes(p.kind) ? `<label>修改对象<select name=quality-target>${run.tasks.filter(t => t.id === p.task_id || t.status === 'succeeded' && run.tasks.some(q => q.role === 'verifier' && q.depends_on.includes(t.id))).map(t => `<option value="${esc(t.id)}" ${t.id === p.task_id ? 'selected' : ''}>${esc(t.title)}</option>`).join('')}</select></label><label class="field"><span>需要修改的具体问题</span><textarea name="quality-feedback" rows="2" maxlength="7000"></textarea></label><button class="btn secondary small" name="reply" value="revise">提出修改并继续</button>` : ''}</form>`;
   }
   function cards(data) {
     return data.runs.map(run => `<article class="panel team-run" data-team-run="${esc(run.id)}"><div class="team-actions">${badge(run.status)}<span class="mono">${date(run.display_created || run.created, true)}</span><a class="text-link" href="#task/${esc(run.id)}">查看任务详情 →</a></div><h3>${esc(run.goal)}</h3><p class="subtext">${run.completed_tasks} / ${run.task_count} 子任务 · ${run.model_calls} 次${run.mode === 'live' ? '模型请求' : '模拟决策'} · ${run.executing ? '正在执行' : '状态已保存'}</p>${run.failure ? `<p class="notice error">${esc(run.failure)}</p>` : ''}<div class="team-task-list">${run.tasks.map(t => `<div>${badge(t.status)} <strong>${esc(run.team_snapshot?.roles[t.owner]?.name || t.owner || '待分派')}</strong> · ${esc(t.title)}${t.summary ? `<p>${esc(t.summary)}</p>` : ''}</div>`).join('')}</div>${pending(run)}<div class="team-artifacts">${run.artifacts.filter(a => a.verification !== 'superseded').map(a => `<a class="text-link" href="${apiPath(`/api/runs/${run.id}/artifacts/${a.id}?download=true`)}" download>${esc(a.path)}${a.verification === 'verified' ? '' : '（待审阅）'} ↓</a>`).join('')}</div>${run.status === 'succeeded' && run.artifacts.length ? `<button class="btn secondary small" data-team-action="inherit" data-run="${esc(run.id)}">基于这些文件发起新任务</button>` : ''}${['failed', 'cancelled'].includes(run.status) ? `<button class="btn secondary small" data-team-action="rerun" data-run="${esc(run.id)}">重新运行</button>` : ''}</article>`).join('') || '<div class="panel team-run"><p class="subtext">团队准备好了。在下方描述目标，点击「发起任务」开始协作。</p></div>';
@@ -80,7 +80,14 @@ export function teamUI({ state, api, apiPath, openModal, closeModal, toast, busy
       if (token !== generation) return;
       current = data;
       // Preserve an answer being typed and any expanded preview during polling.
-      if (!($('#team-runs')?.contains(document.activeElement) && document.activeElement.matches('textarea,input'))) $('#team-runs').innerHTML = cards(data);
+      const drafts = [...document.querySelectorAll('#team-runs [data-team-reply]')].map(form => ({request:form.dataset.request, fields:[...form.querySelectorAll('textarea,select')].map(el => ({name:el.name,value:el.value}))}));
+      if (!($('#team-runs')?.contains(document.activeElement) && document.activeElement.matches('textarea,input,select'))) {
+        $('#team-runs').innerHTML = cards(data);
+        for (const draft of drafts) {
+          const form = [...document.querySelectorAll('#team-runs [data-team-reply]')].find(el => el.dataset.request === draft.request);
+          if (form) for (const field of draft.fields) { const el = form.elements[field.name]; if (el) el.value = field.value; }
+        }
+      }
       updateMessages(data);
       $('#team-state').textContent = data.job.busy ? '团队正在执行，进展自动同步' : '已同步 · 对话与任务均已保存';
     } catch (e) { if (token === generation && $('#team-state')) $('#team-state').textContent = e.message; }
@@ -97,7 +104,7 @@ export function teamUI({ state, api, apiPath, openModal, closeModal, toast, busy
     clearTimeout(timer); timer = setTimeout(refresh, 2500);
   }
   function inheritance(run) {
-    openModal('基于交付文件发起新任务', `<form id="team-inherit-form" data-run="${esc(run.id)}"><p class="subtext">所选归档将按原始路径与字节复制到新任务的只读输入目录。请选择每个路径的一个版本；旧交付不会被修改。</p><div class="team-file-picker">${run.artifacts.map(a => `<label><input type="checkbox" name="artifact" value="${esc(a.id)}" ${a.verification === 'verified' ? 'checked' : ''}><span>${esc(a.path)}<small>${esc(a.verification)} · ${esc(a.sha256.slice(0, 12))} · ${esc(a.id)}</small></span></label>`).join('')}</div><label class="field"><span>下一轮任务</span><textarea id="team-next-goal" rows="6" maxlength="12000" required></textarea></label><div class="modal-actions"><button type="button" class="btn secondary" data-action="close-modal">取消</button><button type="submit" class="btn primary">创建并启动新任务</button></div></form>`);
+    openModal('基于交付文件发起新任务', `<form id="team-inherit-form" data-run="${esc(run.id)}"><p class="subtext">所选归档将按原始路径与字节复制到新任务的只读输入目录。请选择每个路径的一个版本；旧交付不会被修改。</p><div class="team-file-picker">${run.artifacts.map(a => `<label><input type="checkbox" name="artifact" value="${esc(a.id)}" ${a.verification === 'verified' && run.tasks.some(t => t.artifact_ids.includes(a.id)) && run.artifacts.filter(b => b.path === a.path && run.tasks.some(t => t.artifact_ids.includes(b.id))).length === 1 ? 'checked' : ''}><span>${esc(a.path)}<small>${esc(a.verification)} · ${esc(a.sha256.slice(0, 12))} · ${esc(a.id)}</small></span></label>`).join('')}</div><label class="field"><span>下一轮任务</span><textarea id="team-next-goal" rows="6" maxlength="12000" required></textarea></label><div class="modal-actions"><button type="button" class="btn secondary" data-action="close-modal">取消</button><button type="submit" class="btn primary">创建并启动新任务</button></div></form>`);
   }
   document.addEventListener('click', e => {
     const button = e.target.closest('[data-team-action]'); if (!button || button.disabled) return;
@@ -157,7 +164,7 @@ export function teamUI({ state, api, apiPath, openModal, closeModal, toast, busy
         await api('/api/runs', {method: 'POST', body: {team_id: current.team.id, goal: $('#team-next-goal').value, source_run_id: form.dataset.run, artifact_ids, review: true}});
         closeModal();
       } else {
-        const reply = button.name === 'reply' ? button.value : form.querySelector('textarea[name=reply]').value.trim();
+        const reply = button.value === 'revise' ? 'revise:' + form.querySelector('[name=quality-target]').value + '|' + form.querySelector('[name=quality-feedback]').value.trim() : button.name === 'reply' ? button.value : form.querySelector('textarea[name=reply]').value.trim();
         await api(`/api/runs/${form.dataset.teamReply}/resume`, {method: 'POST', body: {team_id: current.team.id, request_id: form.dataset.request, reply}});
         form.replaceChildren(); // Allow the refresh to replace a now-answered prompt.
       }

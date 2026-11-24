@@ -9,7 +9,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .outputs import validate_outputs
+from .outputs import validate_outputs, validate_output_contract
+from .acceptance import requirements, validate_contract, file_manifest, classify_failure, fingerprint, read_review, ReviewBlocked
 from .config import Config
 from .collaboration import ACTION_HELP, ancestors, descendants, normalize_action, urls_in
 from .providers import ProviderUnavailable
@@ -37,12 +38,17 @@ def validate_checks(checks: object) -> list[dict]:
     if not isinstance(checks, list) or not 1 <= len(checks) <= 8:
         raise ValueError("Every task needs 1–8 acceptance checks")
     for check in checks:
-        if not isinstance(check, dict) or check.get("kind") not in {"exists", "contains", "python", "human", "sources"}:
+        if not isinstance(check, dict) or check.get("kind") not in {"exists", "contains", "python", "human", "sources", "review", "sections", "browser"}:
             raise ValueError("Invalid acceptance check")
         if check["kind"] == "human":
             if not isinstance(check.get("reason"), str) or not check["reason"].strip():
                 raise ValueError("Human check requires a reason")
         else:
+            if check['kind']=='browser':
+                from .browser_checks import validate_steps
+                validate_steps(check.get('steps'))
+            if check['kind']=='sections' and (not isinstance(check.get('headings'),list) or not check['headings'] or any(not isinstance(h,str) or not h.strip() for h in check['headings'])):
+                raise ValueError('Sections check needs nonempty headings')
             safe_path(Path.cwd(), check.get("path", ""))
             if check["path"].replace("\\", "/").startswith("inputs/"):
                 raise ValueError("Acceptance checks must target this task's outputs, not inherited inputs")
@@ -121,7 +127,11 @@ class Engine:
         self.store.bind_team(run.get('team_id'))
         team = run.get('team_snapshot')
         self.tools.capabilities = ({a: set(team['roles'][a]['tools']) for a in AGENTS}
-                                   if team else CAPABILITIES)
+                                   if team else {a:set(names) for a,names in CAPABILITIES.items()})
+        for permissions in self.tools.capabilities.values():
+            permissions.add('team_context')
+            if 'python_run' in permissions:
+                permissions.add('verify_revision')
 
     def role_spec(self, run: dict, spec: dict) -> dict:
         if not isinstance(spec, dict):
@@ -149,9 +159,10 @@ class Engine:
         for attempt in range(3):
             if run['active_seconds'] + time.monotonic() - started >= self.config.active_timeout:
                 raise RuntimeError('Run active-time budget exhausted')
-            plan = self.model(run, 'plan', context)
-            self.emit(run, 'coordinator', 'plan_received', {'attempt': attempt + 1, 'plan': plan})
+            plan = {}
             try:
+                plan = self.model(run, 'plan', context)
+                self.emit(run, 'coordinator', 'plan_received', {'attempt': attempt + 1, 'plan': plan})
                 if plan.get('question'):
                     question, options = clarification(plan, chinese=self.config.provider != 'demo')
                     self.wait(run, None, 'planning', question, options=options)
@@ -161,7 +172,14 @@ class Engine:
                 specs = plan.get('tasks')
                 if isinstance(specs, list):
                     specs = [self.role_spec(run, spec) for spec in specs]
-                return validate_plan(specs, self.config.max_tasks, self.tools.capabilities)
+                tasks = validate_plan(specs, self.config.max_tasks, self.tools.capabilities)
+                if self.config.provider != 'demo' and run.get('execution_schema', 0) >= 3:
+                    validate_output_contract(specs)
+                    required = requirements(plan.get('requirements'))
+                    validate_contract(tasks, required)
+                    run['requirements'] = required
+                    run['requirements_context_version'] = Teams(self.store).decisions(run['team_id'])['version'] if run.get('team_id') else 0
+                return tasks
             except (ValueError, TypeError) as exc:
                 self.emit(run, 'coordinator', 'plan_rejected', {'reason': str(exc), 'attempt': attempt + 1})
                 if attempt == 2:
@@ -215,7 +233,7 @@ class Engine:
                "human_wait_seconds": 0.0, "clarifications": [], "memory_enabled": memory,
                "initial_memory_hashes": {a: digest(json.dumps(self.store.memory(a), sort_keys=True).encode()) for a in AGENTS},
                "initial_inputs": [], "failure": None, "finish_recorded": False, "require_review": require_review,
-               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2,
+               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2, "execution_schema": 3, "requirements": [],
                'team_id': team_id, 'team_snapshot': team, 'group_history': history,
                'inherited_inputs': [], 'input_manifest': []}
         self.bind_run(run)
@@ -281,6 +299,15 @@ class Engine:
                            role_profile=run['team_snapshot']['roles'][context.get('agent', 'coordinator')],
                            recent_group_messages=[{'sender': m['sender'], 'body': m['body'][:1200]}
                                                   for m in self.store.messages('group', limit=8)])
+        context['requirements'] = run.get('requirements', [])
+        context['inherited_manifest'] = [{k:m[k] for k in ('source_run_id','artifact_id','path','input_path','sha256','source_requirements') if k in m} for m in run.get('inherited_inputs',[])]
+        if run.get('team_id'):
+            context['durable_context'] = Teams(self.store).decisions(run['team_id'])
+            version = context['durable_context']['version']
+            if run.get('requirements_context_version') is not None and version != run.get('observed_context_version',run['requirements_context_version']):
+                self.emit(run,'coordinator','requirements_context_changed',{'previous':run.get('observed_context_version',run['requirements_context_version']),'current':version,'plan_requirements_retained':True})
+                run['observed_context_version']=version
+            context['requirements_context_changed'] = version != run.get('requirements_context_version',version)
         if purpose == 'plan':
             context = dict(context, group_history=run.get('group_history'), inherited_inputs=run.get('inherited_inputs', []))
         self.check_cancelled()
@@ -302,6 +329,7 @@ class Engine:
                              for t in run['tasks'] if t['id'] in upstream],
                 'downstream_requirements': [{k: t[k] for k in ('id','role','objective','checks')}
                                            for t in run['tasks'] if t['id'] in downstream],
+                'input_bindings': task.get('input_bindings', []),
                 'revision_feedback': task.get('revision_feedback'),
                 'source_evidence': task.get('source_evidence', []),
                 'frozen_tests': task.get('revision_tests', [])}
@@ -326,6 +354,7 @@ class Engine:
         source_tasks = ancestors(run['tasks'], task['id'])
         source_ids = {identifier for t in run['tasks'] if t['id'] in source_tasks for identifier in t['artifact_ids']}
         source_ids.update(task.get('handoff_ids', []))
+        source_ids.update(task.get('repair_input_ids', []))
         bindings = task.setdefault('input_bindings', [])
         # Older runs have only immutable artifact paths; reconstruct their bindings.
         for artifact in run['artifacts']:
@@ -366,7 +395,8 @@ class Engine:
             raise ValueError('Revision budget exhausted (two rounds per run)')
         if run['steps'] >= self.config.max_steps or run['model_calls'] >= self.config.max_model_calls or run['active_seconds'] >= self.config.active_timeout:
             raise ValueError('Run budget exhausted; start a new task with the saved evidence')
-        candidates = [t for t in run['tasks'] if t['id'] in verifier['depends_on'] and t['status'] == 'succeeded' and t['role'] != 'verifier']
+        allowed_sources = ancestors(run['tasks'],verifier['id']) if run.get('execution_schema',0)>=3 and target_id else verifier['depends_on']
+        candidates = [t for t in run['tasks'] if t['id'] in allowed_sources and t['status'] == 'succeeded' and t['role'] != 'verifier']
         if not target_id and len(candidates) > 1 and reason.strip():
             self.freeze_verification(run, verifier)
             raise RevisionTargetRequired('Choose the responsible author with request_revision(target_task, reason). '
@@ -382,6 +412,31 @@ class Engine:
         number = run.get('revision_count', 0) + 1
         feedback = {'round': number, 'from_task': verifier['id'], 'target_task': target['id'], 'reason': reason[:4000],
                     'verifier_objective': verifier['objective'], 'checks': verifier['checks'], 'frozen_tests': frozen[:], 'created': time.time()}
+        # Reverse handoff is explicitly authorized and pinned; ancestor lookup alone cannot deliver QA files.
+        target.setdefault('repair_input_ids', []).extend(f['artifact_id'] for f in frozen if f['artifact_id'] not in target.get('repair_input_ids', []))
+        feedback['failure_evidence'] = copy.deepcopy(verifier.get('last_verification'))
+        feedback['requirements'] = copy.deepcopy(run.get('requirements', []))
+        feedback['reproduction_inputs'] = []
+        observed = (verifier.get('last_verification') or {}).get('result',{}).get('verification',{}).get('manifest',{})
+        for binding in verifier.get('input_bindings',[]):
+            if binding['path'] not in observed:
+                continue
+            artifact = next(a for a in run['artifacts'] if a['id']==binding['artifact_id'])
+            content = self.store.artifact_bytes(artifact)
+            if digest(content) != observed[binding['path']]:
+                raise ValueError('Repair package evidence changed; rerun verification before revision')
+            package_path = f"inputs/repairs/round_{number}/{binding['path']}"
+            destination = safe_path(self.store.workspace(target['owner'],run['id']),package_path)
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            if destination.exists() and digest(destination.read_bytes()) != artifact['sha256']:
+                raise ValueError('Repair package conflicts with an existing input; cannot replace silently')
+            destination.write_bytes(content)
+            if package_path not in target['inputs']:
+                target['inputs'].append(package_path)
+            feedback['reproduction_inputs'].append({'path':package_path,'original_test_path':binding['path'],'sha256':artifact['sha256']})
+        if target['owner']:
+            self.refresh_inputs(run, target)
+            feedback['test_inputs'] = [b.copy() for b in target.get('input_bindings', []) if b['artifact_id'] in target['repair_input_ids']]
         run.setdefault('revisions', []).append(feedback)
         run['revision_count'] = number
         for task in run['tasks']:
@@ -424,6 +479,22 @@ class Engine:
                          and any(h.get('result', {}).get('observed_error') for h in t['history'])), None)
         if not verifier:
             raise ValueError('No failed verifier with recorded evidence is available')
+        if run.get('execution_schema',0)>=3:
+            if run['model_calls']>=self.config.max_model_calls or run['active_seconds']>=self.config.active_timeout or verifier['steps']>=self.config.max_task_steps or run.get('diagnostic_resume_count',0)>=2:
+                raise ValueError('Diagnostic resume budget exhausted; start a new task with archived evidence')
+            run['diagnostic_resume_count']=run.get('diagnostic_resume_count',0)+1
+            run.update(status='running',failure=None,ended=None,finish_recorded=False,pending=None)
+            verifier.update(status='running',error_streak=0,summary='')
+            for dependent in run['tasks']:
+                if dependent['id'] in descendants(run['tasks'],verifier['id']) and dependent['summary']=='Required dependency did not succeed':
+                    dependent.update(status='pending',summary='')
+            self.freeze_verification(run,verifier)
+            observed=verifier.get('last_verification',{}).get('result',{}).get('verification',{})
+            if observed.get('executed',0)>0:
+                self.diagnose_verification(run,verifier)
+            self.emit(run,'human','diagnostic_resume',{'task_id':verifier['id'],'attempt':run['diagnostic_resume_count']})
+            self.store.save(run)
+            return run
         reason = next(h['result']['observed_error'] for h in reversed(verifier['history']) if h.get('result', {}).get('observed_error'))
         try:
             return self.request_revision(run, verifier, reason)
@@ -550,7 +621,20 @@ class Engine:
         message = str(exc)[:2000]
         task["error_streak"] += 1
         snapshot = self.store.snapshot(run, task) if task["owner"] else []
-        record = {"error_type": type(exc).__name__, "observed_error": message,
+        result = task.get('last_verification', {}).get('result', {})
+        category = classify_failure(message, result)
+        evidence = result.get('verification',{})
+        observed = re.sub(r'EVOTASK_VERIFICATION_[a-f0-9]+', 'EVOTASK_VERIFICATION', result.get('output',message)) if task.get('last_verification',{}).get('step')==task['steps'] else message
+        version = json.dumps({'targets': evidence.get('targets') or evidence.get('manifest', {}),
+                              'test_sha256': result.get('test_artifact', {}).get('sha256'),
+                              'check': task.get('last_verification', {}).get('check')}, sort_keys=True)
+        key = fingerprint(category, observed, version)
+        repeats = task.setdefault('failure_fingerprints', {})
+        repeats[key] = repeats.get(key, 0) + 1
+        task['failure_diagnosis'] = {'category': category, 'fingerprint': key, 'occurrences': repeats[key], 'evidence': task.get('last_verification')}
+        if run.get('execution_schema', 0) >= 3 and repeats[key] >= 3:
+            terminal = True
+        record = {"category": category, "fingerprint": key, "occurrences": repeats[key], "error_type": type(exc).__name__, "observed_error": message,
                   "cause_hypothesis": None, "artifact_ids": [a["id"] for a in snapshot]}
         task["history"].append({"action": action, "result": {"success": False, **record}})
         self.emit(run, task["owner"] or "coordinator", "attempt_failed", {"task_id": task["id"], **record})
@@ -619,8 +703,24 @@ class Engine:
         outcomes = []
         try:
             self.check_frozen_tests(run, task)
+            if run.get('execution_schema', 0) >= 3:
+                # Every check, including browser and review checks, must see the authorized version.
+                by_id = {a['id']: a for a in run['artifacts']}
+                for binding in task.get('input_bindings', []):
+                    expected = by_id[binding['artifact_id']]['sha256']
+                    if file_manifest(root, [binding['path']])[binding['path']] != expected:
+                        raise ValueError('Authorized input snapshot changed: ' + binding['path'])
             for artifact in artifacts:
                 self.check_citations(task, artifact)
+                if task['role']=='verifier' and artifact['path'].endswith('.json'):
+                    value = json.loads(self.store.artifact_bytes(artifact))
+                    if isinstance(value,dict) and 'verdict' in value:
+                        # A structured negative/blocked review can never be promoted by an unrelated passing test.
+                        review = read_review(safe_path(root,artifact['path']))
+                        for item in review['requirements']:
+                            for evidence in item['evidence']:
+                                if file_manifest(root,[evidence['path']])[evidence['path']] != evidence['sha256']:
+                                    raise ValueError('Review evidence hash mismatch: '+evidence['path'])
             for check in sorted(task["checks"], key=lambda c: c['kind'] == 'human'):
                 kind = check["kind"]
                 if kind == "human":
@@ -631,13 +731,16 @@ class Engine:
                         return
                     outcomes.append({"kind": "human", "passed": True})
                     continue
-                path = self.tools._file(root, check["path"])
+                actual_path = check['path']
+                if check.get('source_task'):
+                    actual_path = self.resolve_input(task, check['source_task'], check['path'])
+                path = self.tools._file(root, actual_path)
                 if not path.is_file():
                     raise ValueError(f"Acceptance failed: missing {check['path']}")
                 if path.stat().st_size > self.config.max_file_bytes:
                     raise ValueError("Acceptance target exceeds file limit")
                 if kind == "contains" and check["text"] not in path.read_text(encoding="utf-8"):
-                    raise ValueError(f"Acceptance failed: {check['path']} missing required text")
+                    raise ValueError(f"Acceptance failed: {actual_path} missing required text {check['text']!r}")
                 if kind == 'sources':
                     content = path.read_text(encoding='utf-8')
                     local = set(CITATION.findall(content)) & set(task.get('allowed_citations', []))
@@ -646,11 +749,40 @@ class Engine:
                     policy = check.get('policy', 'any')
                     if not (cited_urls if policy == 'url' else local if policy == 'local' else cited_urls or local):
                         raise ValueError(f"Acceptance failed: {check['path']} needs observed sources ({policy}); do not invent links")
+                if kind == 'sections':
+                    actual = {re.sub(r'\s+',' ',line.lstrip('#').strip()).casefold() for line in path.read_text(encoding='utf-8').splitlines() if line.startswith('#')}
+                    if path.suffix.lower()=='.html':
+                        from .acceptance import html_headings
+                        actual=html_headings(path.read_text(encoding='utf-8'))
+                    missing = [h for h in check['headings'] if re.sub(r'\s+',' ',h.strip()).casefold() not in actual]
+                    if missing:
+                        raise ValueError(f'Section check failed: {actual_path}; missing={missing}; actual={sorted(actual)}')
+                if kind == 'browser':
+                    from .browser_checks import verify_browser
+                    result = verify_browser(root,actual_path,check['steps'],self.config.tool_timeout)
+                    result['verification']['requirement_ids']=check.get('requirement_ids',[])
+                    task['last_verification']={'step':task['steps'],'path':actual_path,'result':result,'check':copy.deepcopy(check)}
+                    self.emit(run,task['owner'],'verification_evidence',{'task_id':task['id'],'path':actual_path,'result':result})
+                    outcomes.append({'kind':kind,'path':actual_path,'result':result})
+                    if not result['success']:
+                        raise ValueError('Browser check failed: '+result['output'])
+                if kind == 'review':
+                    review = read_review(path)
+                    required = set(check.get('requirement_ids', []))
+                    reviewed = {r['id'] for r in review['requirements'] if r['status']=='pass'}
+                    if not required <= reviewed:
+                        raise ValueError('Review is missing requirements: ' + ', '.join(sorted(required-reviewed)))
+                    for item in review['requirements']:
+                        for evidence in item['evidence']:
+                            manifest = file_manifest(root, [evidence['path']])
+                            if evidence.get('sha256') != manifest[evidence['path']]:
+                                raise ValueError('Review evidence hash mismatch: ' + evidence['path'])
+                    outcomes.append({'kind':kind,'path':actual_path,'review':review})
                 if kind == "python":
                     self.tools.validate(task["owner"], "python_run", {"path": check["path"]})
                     run["inflight"] = {"task_id": task["id"], "action": {"type": "verification", "check": check}, "started": time.time()}
                     self.store.save(run)
-                    result = self.tools.sandbox.execute(root, check["path"])
+                    result = self.verify(run, task, check)
                     run["inflight"] = None
                     task['last_verification'] = {'step': task['steps'], 'path': check['path'], 'result': result}
                     self.check_frozen_tests(run, task)
@@ -671,6 +803,8 @@ class Engine:
         for artifact in artifacts:
             artifact["verification"] = "verified"
             artifact["verification_scope"] = "declared_checks_only"
+            artifact["acceptance_evidence"] = copy.deepcopy(outcomes)
+            artifact["requirements"] = copy.deepcopy(run.get("requirements", []))
         task["artifact_ids"] = [a["id"] for a in artifacts]
         task["status"] = "succeeded"
         task["summary"] = str(action.get("summary", ""))[:3000]
@@ -682,6 +816,105 @@ class Engine:
                 "trigger": task["objective"], "lesson": "此前类似任务通过以下检查；仍需在新任务重验：" + json.dumps(task["checks"], ensure_ascii=False),
                 "verified": True, "evidence": {"artifacts": task["artifact_ids"], "checks": outcomes}, "kind": "success"})
         self.store.save(run)
+
+    def diagnose_verification(self, run: dict, task: dict) -> None:
+        evidence = task['last_verification']
+        if 'check' not in evidence and evidence.get('result',{}).get('sandbox')=='isolated-browser-context':
+            for check in task['checks']:
+                if check['kind']=='browser':
+                    actual=self.resolve_input(task,check['source_task'],check['path']) if check.get('source_task') else check['path']
+                    if actual==evidence['path']:evidence['check']=copy.deepcopy(check);break
+        root = self.store.workspace(task['owner'],run['id'])
+        files = {}
+        observed = evidence.get('result',{}).get('verification',{}).get('manifest',{})
+        source_paths = list(evidence.get('result',{}).get('verification',{}).get('targets',{})) or [b['path'] for b in task.get('input_bindings',[]) if b['path'] in observed][:5]
+        for path in [evidence['path']] + source_paths:
+            source = self.tools._file(root,path)
+            if source.is_file(): files[path] = source.read_text(encoding='utf-8')[:12000]
+        decision = self.model(run,'diagnose',{'agent':task['owner'],'task':task,'failure':evidence,
+            'files':files,'collaboration':self.collaboration_context(run,task),'goal':run['goal']})
+        category = decision.get('failure_kind')
+        if category not in {'business','test','path','environment','evidence','uncertain'} or not isinstance(decision.get('reason'),str):
+            raise ValueError('Diagnosis requires failure_kind and evidence-based reason')
+        task['history'].append({'event':'failure_diagnosed','decision':decision,'evidence':copy.deepcopy(evidence)})
+        self.emit(run,task['owner'],'failure_diagnosed',{'task_id':task['id'],'decision':decision})
+        if category=='business':
+            self.action(run,task,dict(decision,type='request_revision'))
+        elif category=='test' and evidence.get('check',{}).get('kind') in {'browser','sections','contains'}:
+            check=evidence['check']
+            proposal=self.model(run,'repair_check',{'agent':task['owner'],'task':task,'diagnosis':decision,'files':files,
+                'failure':evidence,'goal':run['goal'],'check_index':task['checks'].index(check),'original_check':check})
+            proposal=self.normalize_decision(run,task,proposal)
+            if proposal['type'] not in {'revise_check','ask'}:raise ValueError('Return revise_check or ask for a declarative test error')
+            self.action(run,task,proposal)
+        elif category=='test' and any(f['path']==evidence['path'] for f in task.get('revision_tests',[])):
+            proposal=self.model(run,'repair_test',{'agent':task['owner'],'task':task,'diagnosis':decision,'files':files,
+                'failure':evidence,'goal':run['goal'],'required_action':'revise_test or ask; do not rerun unchanged failed tests'})
+            proposal=self.normalize_decision(run,task,proposal)
+            if proposal['type'] not in {'revise_test','ask'}:
+                raise ValueError('Test diagnosis must propose a test revision or ask for clarification')
+            if proposal['type']=='revise_test' and proposal.get('path')!=evidence['path']:
+                raise ValueError('Test correction must target the observed failing script')
+            self.action(run,task,proposal)
+        else:
+            task['history'].append({'event':'repair_guidance' ,'guidance':
+                'Wrong frozen test: use revise_test with exact corrected content/reason/requirement_ids; preserve valid business assertions. Path/environment: fix inputs/test harness, never reopen author without evidence. Uncertain: ask human.'})
+
+    @staticmethod
+    def resolve_input(task: dict, source: str, path: str) -> str:
+        bindings = [b for b in task.get('input_bindings', []) if b['task_id']==source and b['artifact_path']==path]
+        if len(bindings) != 1:
+            raise ValueError(f'Input contract unresolved: {source}/{path}; inspect input_bindings instead of guessing/copying filenames')
+        return bindings[0]['path']
+
+    def verify(self, run: dict, task: dict, check: dict) -> dict:
+        root = self.store.workspace(task['owner'], run['id'])
+        if run.get('execution_schema',0) < 3 or not hasattr(self.tools.sandbox,'verify'):
+            return self.tools.sandbox.execute(root, check['path'])
+        targets = [t['path'] if t['task_id']==task['id'] else self.resolve_input(task,t['task_id'],t['path']) for t in check.get('targets',[])]
+        expected = file_manifest(root, targets)
+        for binding in task.get('input_bindings',[]):
+            if binding['path'] in expected:
+                artifact = next(a for a in run['artifacts'] if a['id']==binding['artifact_id'])
+                if expected[binding['path']] != artifact['sha256']:
+                    raise ValueError('Authorized input snapshot changed: '+binding['path'])
+        test_snapshot = self.store.archive(run,task['owner'],check['path'],task['id'],origin='verification')
+        result = self.tools.sandbox.verify(root, check['path'])
+        result['test_artifact'] = {'id':test_snapshot['id'],'sha256':test_snapshot['sha256']}
+        evidence = result.get('verification', {})
+        evidence['requirement_ids'] = check.get('requirement_ids', [])
+        evidence['targets'] = expected
+        missing = [p for p,h in expected.items() if evidence.get('manifest',{}).get(p) != h]
+        if missing:
+            result['success'] = False
+            result['output'] += '\nAcceptance target not exercised: ' + ', '.join(missing)
+        task['last_verification'] = {'step':task['steps'],'path':check['path'],'result':result}
+        if not result['success'] and task['role']=='verifier' and evidence.get('executed',0)>0:
+            self.freeze_verification(run,task)
+            result['diagnosis_required'] = 'Executed failing assertions are archived and frozen. Diagnose against requirements: business defect -> request_revision; wrong expectation -> revise_test with human approval. Never weaken a failed test silently.'
+        self.emit(run,task['owner'],'verification_evidence',{'task_id':task['id'],'path':check['path'],'result':result})
+        return result
+
+    def propose_test_revision(self, run: dict, task: dict, action: dict) -> None:
+        import difflib
+        if task['role'] != 'verifier':
+            raise ValueError('Only the independent verifier may propose a frozen test correction')
+        path = action.get('path')
+        if not any(f['path']==path for f in task.get('revision_tests',[])):
+            raise ValueError('revise_test requires an existing frozen test; repair unfrozen test scripts using file tools')
+        reason, content = action.get('reason'), action.get('content')
+        ids = action.get('requirement_ids',[])
+        if not isinstance(reason,str) or not reason.strip() or not isinstance(content,str) or len(content.encode())>self.config.max_file_bytes:
+            raise ValueError('Test correction needs reason and bounded complete replacement content')
+        if not ids or not set(ids) <= {r['id'] for r in run.get('requirements',[])}:
+            raise ValueError('Test correction must identify known requirements')
+        target = self.tools._file(self.store.workspace(task['owner'],run['id']),path,writing=True)
+        old = target.read_bytes()
+        if digest(old) == digest(content.encode()):
+            raise ValueError('Proposed test has no changes')
+        prepared = {'path':path,'old_hash':digest(old),'content':content,'reason':reason,'requirement_ids':ids,
+                    'diff':''.join(difflib.unified_diff(old.decode().splitlines(True),content.splitlines(True),fromfile='frozen',tofile='proposed'))}
+        self.wait(run,task,'test_revision','测试与需求存在冲突。是否批准以下测试修订？修改后必须重新验证。',action,prepared)
 
     def normalize_decision(self, run: dict, task: dict, action: dict) -> dict:
         normalized = normalize_action(action)
@@ -698,7 +931,21 @@ class Engine:
             for field in {'finish': ('summary',), 'delegate': ('title', 'objective'),
                           'fail': ('reason',), 'request_revision': ('reason',)}.get(kind, ()):
                 chinese_prose(action.get(field, ''), field)
+        if kind == 'revise_check':
+            from .check_revision import propose
+            propose(self,run,task,action)
+            return
+        if kind == 'revise_test':
+            self.propose_test_revision(run, task, action)
+            return
         if kind == 'request_revision':
+            if run.get('execution_schema', 0) >= 3:
+                if action.get('failure_kind') != 'business' or not action.get('requirement_ids'):
+                    raise ValueError('Diagnose first: business revision needs failure_kind=business and requirement_ids. Fix test/path errors locally; use revise_test for frozen tests; ask when uncertain.')
+                if not set(action['requirement_ids']) <= {r['id'] for r in run.get('requirements', [])}:
+                    raise ValueError('Revision references unknown requirements')
+                if not task.get('last_verification') and not action.get('evidence'):
+                    raise ValueError('Business revision requires observed test failure or explicit defect evidence')
             self.request_revision(run, task, str(action.get('reason', '')), action.get('target_task'))
             return
         if kind == "ask":
@@ -709,6 +956,8 @@ class Engine:
             self.finish(run, task, action, approved, prepared.get("artifacts") if prepared else None)
             return
         if kind == "fail":
+            if run.get('execution_schema',0)>=3 and task['role']=='verifier' and any(c['kind']=='python' for c in task['checks']) and not task.get('last_verification'):
+                raise ValueError('Verifier must create and execute a minimal independent check before declaring an implementation defect terminal. Reproducible business defects use request_revision; missing evidence/environment uses ask with a concrete blocker.')
             raise RuntimeError("Agent reported inability to finish: " + str(action.get("reason", "")))
         if kind == "delegate":
             result = self.delegate(run, task, action)
@@ -724,7 +973,11 @@ class Engine:
             self.store.save(run)  # Never silently replay a potentially side-effecting operation after a crash.
             if name == 'python_run':
                 self.check_frozen_tests(run, task)
-            result = self.tools.execute(run, task, name, args, prepared)
+            planned_check = next((c for c in task['checks'] if c['kind']=='python' and c['path']==args.get('path')), None)
+            if name == 'python_run' and planned_check and run.get('execution_schema',0) >= 3:
+                result = self.verify(run, task, planned_check)
+            else:
+                result = self.tools.execute(run, task, name, args, prepared)
             run["inflight"] = None
             if name == 'python_run':
                 task['last_verification'] = {'step': task['steps'], 'path': args['path'], 'result': result}
@@ -821,6 +1074,16 @@ class Engine:
                         raise RuntimeError("Task step budget exhausted")
                     task["steps"] += 1
                     run["steps"] += 1
+                    feedback = task.get('revision_feedback') or {}
+                    if feedback.get('target_task') == task['id']:
+                        root = self.store.workspace(task['owner'],run['id'])
+                        for item in feedback.get('reproduction_inputs',[]):
+                            if file_manifest(root,[item['path']])[item['path']] != item['sha256']:
+                                raise ValueError('Repair package input hash mismatch: '+item['path'])
+                        for item in feedback.get('test_inputs',[]):
+                            artifact = next(a for a in run['artifacts'] if a['id']==item['artifact_id'])
+                            if file_manifest(root,[item['path']])[item['path']] != artifact['sha256']:
+                                raise ValueError('Repair package test hash mismatch: '+item['path'])
                     context = {"agent": task["owner"], "goal": run["goal"], "task": task,
                                "tools": self.tools.specs(task["owner"]),
                                "workspace_files": self.tools.files(self.store.workspace(task["owner"], run["id"])),
@@ -834,11 +1097,25 @@ class Engine:
                     if isinstance(exc, (ProviderUnavailable, RunCancelled)):
                         raise
                     run["inflight"] = None
+                    if isinstance(exc,ReviewBlocked):
+                        task['history'].append({'event':'review_blocked','review':exc.review})
+                        self.wait(run,task,'review_blocked','独立审查缺少足够证据，暂不能交付。请补充来源或说明需要调整的要求。',action,{'review':exc.review})
+                        continue
                     self.fail_attempt(run, task, action, exc, terminal=(
                         task["steps"] >= self.config.max_task_steps or run["model_calls"] >= self.config.max_model_calls
-                        or action.get("type") == "fail"))
+                        or action.get("type") == "fail" and not str(exc).startswith('Verifier must')))
                     verification = task.get('last_verification', {})
-                    if (task['role'] == 'verifier' and verification.get('step') == task['steps']
+                    if (run.get('execution_schema',0)>=3 and task['role']=='verifier' and task['steps']<self.config.max_task_steps and run['model_calls']<self.config.max_model_calls and run.get('revision_count',0)<2
+                            and verification.get('step')==task['steps'] and not verification.get('result',{}).get('success',True)
+                            and verification.get('result',{}).get('verification',{}).get('executed',0)>0):
+                        try:
+                            self.diagnose_verification(run,task)
+                        except ProviderUnavailable:
+                            raise
+                        except (ValueError,TypeError) as diagnosis_error:
+                            task['history'].append({'event':'diagnosis_incomplete','reason':str(diagnosis_error)})
+                            self.emit(run,task['owner'],'diagnosis_incomplete',{'task_id':task['id'],'reason':str(diagnosis_error)})
+                    if (run.get('execution_schema',0) < 3 and task['role'] == 'verifier' and verification.get('step') == task['steps']
                             and not verification.get('result', {}).get('success', True)
                             and 'AssertionError' in verification.get('result', {}).get('output', '')
                             and (action.get('name') == 'python_run' or action.get('type') == 'finish')):
@@ -876,6 +1153,94 @@ class Engine:
         if not pending or pending["id"] != request_id:
             raise ValueError("No matching pending request; old approvals cannot be reused")
         task = next((t for t in run["tasks"] if t["id"] == pending["task_id"]), None)
+        if pending['kind'] in {'acceptance','test_revision','check_revision'} and reply.startswith('revise:'):
+            reason = reply[7:].strip()
+            target_id = task['id']
+            if '|' in reason:
+                candidate, detail = reason.split('|',1)
+                if any(t['id']==candidate for t in run['tasks']):
+                    target_id, reason = candidate, detail.strip()
+            if not reason:
+                raise ValueError('Quality revision needs specific feedback')
+            if target_id != task['id']:
+                reviewer = next((t for t in run['tasks'] if t['role']=='verifier' and t.get('owner') and target_id in ancestors(run['tasks'],t['id'])),None)
+                if not reviewer:
+                    raise ValueError('Selected target has no independent reviewer; choose its own review or provide clarification')
+                feedback = self.request_revision(run,reviewer,'人工质量反馈：'+reason,target_id)
+                feedback['origin']='human_quality_feedback'
+                self.store.message('group','human','质量反馈（'+target_id+'）：'+reason)
+                run['clarifications'].append({'question':'交付验收修改意见','answer':reason,'task_id':target_id})
+                self.emit(run,'human','quality_revision_requested',{'task_id':target_id,'reason':reason,'request_id':request_id})
+                run['human_wait_seconds'] += time.time()-pending['created']
+                self.store.save(run)
+                return self.advance(run)
+            run['human_wait_seconds'] += time.time() - pending['created']
+            self.emit(run, 'human', 'quality_revision_requested' , {'task_id': task['id'], 'reason': reason, 'request_id':request_id})
+            run['clarifications'].append({'question':'交付验收修改意见', 'answer':reason, 'task_id':task['id']})
+            self.store.message('group','human','质量反馈（'+task['id']+'）：'+reason)
+            if task['role']=='verifier' and any(t['status']=='succeeded' and t['id'] in task['depends_on'] for t in run['tasks']):
+                # Give the independent verifier the feedback; it must diagnose the responsible task.
+                task['history'].append({'event':'human_quality_feedback','reason':reason})
+            else:
+                for a in pending.get('prepared',{}).get('artifacts',[]):
+                    next(x for x in run['artifacts'] if x['id']==a['id'])['verification']='superseded'
+                task['history'].append({'event':'human_quality_feedback','reason':reason})
+            run.update(pending=None,status='running')
+            task.update(status='running')
+            self.store.save(run)
+            return self.advance(run)
+        if pending['kind'] in {'check_revision','test_revision'} and reply.startswith('no:'):
+            feedback=reply[3:].strip()
+            if not feedback:raise ValueError('Test review feedback cannot be empty')
+            run['clarifications'].append({'question':'测试修订被拒绝的原因','answer':feedback,'task_id':task['id']})
+            self.emit(run,'human','test_revision_feedback',{'request_id':request_id,'reason':feedback})
+            reply='no'
+        if pending['kind']=='check_revision':
+            from .check_revision import apply
+            apply(self,run,task,pending,reply)
+            run['human_wait_seconds']+=time.time()-pending['created']
+            run.update(pending=None,status='running');task['status']='running'
+            self.store.save(run)
+            return self.advance(run)
+        if pending['kind'] == 'test_revision':
+            if reply.lower() not in {'yes','no'}:
+                raise ValueError('Test revision reply must be yes or no')
+            prepared = pending['prepared']
+            root = self.store.workspace(task['owner'],run['id'])
+            path = self.tools._file(root,prepared['path'],writing=True)
+            if digest(path.read_bytes()) != prepared['old_hash']:
+                raise ValueError('Test changed after proposal; stale approval rejected')
+            if reply.lower()=='yes':
+                path.write_bytes(prepared['content'].encode('utf-8'))
+                artifact = self.store.archive(run,task['owner'],prepared['path'],task['id'])
+                task['revision_tests'] = [f for f in task.get('revision_tests',[]) if f['path'] != prepared['path']]
+                task['revision_tests'].append({'path':prepared['path'],'artifact_id':artifact['id'],'sha256':artifact['sha256']})
+            self.emit(run,'human','test_revision_reviewed',{'request_id':request_id,'approved':reply.lower()=='yes','old_hash':prepared['old_hash'],'new_hash':digest(prepared['content'].encode()),'reason':prepared['reason']})
+            task['history'].append({'event':'test_revision_reviewed','approved':reply.lower()=='yes','reason':prepared['reason']})
+            run['human_wait_seconds'] += time.time()-pending['created']
+            run.update(pending=None,status='running'); task['status']='running'
+            check = next((c for c in task['checks'] if c['kind']=='python' and c['path']==prepared['path']), {'kind':'python','path':prepared['path']})
+            # Resume against the exact retained/approved test immediately; don't ask the model to rewrite it again.
+            started=time.monotonic()
+            try:
+                result=self.verify(run,task,check)
+                task['history'].append({'event':'test_revision_reverified','approved':reply.lower()=='yes','result':result})
+                if result['success']:
+                    task['failure_diagnosis']={'category':'resolved','evidence':task['last_verification']}
+                    task['error_streak']=0
+                else:
+                    self.fail_attempt(run,task,{'type':'verification','path':check['path']},ValueError(result['output']))
+                    if run['model_calls']<self.config.max_model_calls:
+                        self.diagnose_verification(run,task)
+            except (ProviderUnavailable,RunCancelled):
+                raise
+            except Exception as exc:
+                self.fail_attempt(run,task,{'type':'verification','path':check['path']},exc)
+                self.wait(run,task,'verification_blocked','测试修订已记录，但复验暂未完成。请处理环境或输入问题后回复继续。',prepared={'error':str(exc)[:2000]})
+            finally:
+                run['active_seconds']+=time.monotonic()-started
+                self.store.save(run)
+            return self.advance(run)
         approval = pending["kind"] in {"tool_approval", "acceptance"}
         if approval and reply.lower() not in {"yes", "no"}:
             raise ValueError("Approval reply must be exactly yes or no")
