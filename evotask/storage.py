@@ -140,14 +140,9 @@ class Store:
     def messages(self, channel: str, reader: str = "human", limit: int = 20, *, metadata: bool = False) -> list[dict]:
         if reader != "human" and channel != "group" and channel != f"private:{reader}":
             raise PermissionError("Private conversation is not visible to this agent")
-<<<<<<< HEAD
         columns = "seq,sender,body,created" if metadata else "sender,body"
         rows = self.db.execute(f"SELECT {columns} FROM messages WHERE channel=? ORDER BY seq DESC LIMIT ?",
-                               (channel, limit)).fetchall()
-=======
-        rows = self.db.execute("SELECT sender,body FROM messages WHERE channel=? ORDER BY seq DESC LIMIT ?",
                                (self.scoped_channel(channel), limit)).fetchall()
->>>>>>> b8fb6de (增加自定义agent功能)
         return [dict(row) for row in reversed(rows)]
 
     def workspace(self, agent: str, run_id: str) -> Path:

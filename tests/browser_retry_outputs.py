@@ -73,14 +73,20 @@ def main():
         assert not page.locator('#modal').evaluate('(el)=>el.open')
         expect(page).to_have_url(args.url+'/#task/'+new_id)
         expect(page.locator('.detail-meta').first).to_contain_text('已完成',timeout=20000)
-        expect(page.get_by_role('link',name='查看原失败任务')).to_be_visible()
+        expect(page.get_by_role('link',name='查看原失败任务')).to_have_count(0)
         page.screenshot(path=str(output/'retry-completed.png'),full_page=True,animations='disabled')
-        page.get_by_role('link',name='查看原失败任务').click()
-        expect(page.get_by_role('button',name='重新运行',exact=True)).to_be_visible()
-        expect(page.get_by_role('link',name='查看重新运行的任务 '+new_id[-6:])).to_be_visible()
+        page.goto(args.url+'/#task/'+run['id'])
+        expect(page).to_have_url(args.url+'/#task/'+new_id)
+        page.goto(args.url+'/#runs')
+        expect(page.locator(f'[data-run="{run["id"]}"]')).to_have_count(0)
+        expect(page.locator(f'[data-run="{new_id}"]')).to_have_count(1)
+        store=Store(root)
+        assert store.load(run['id'])['status']=='failed'
+        assert store.load(run['id'])['artifacts']
+        store.close()
         assert not errors,errors
         browser.close()
-    print(json.dumps({'status':'passed','checks':['list-one-click-retry','no-confirmation','linked-runs','duplicate-snapshots','same-filenames','preview-download-name','collapsed-history-process','mobile'],'page_errors':errors}))
+    print(json.dumps({'status':'passed','checks':['list-one-click-retry','no-confirmation','latest-attempt-only-with-audit','duplicate-snapshots','same-filenames','preview-download-name','collapsed-history-process','mobile'],'page_errors':errors}))
 
 
 if __name__=='__main__':main()

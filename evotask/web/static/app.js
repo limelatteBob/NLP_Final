@@ -1,3 +1,4 @@
+import { updateNetwork, destroyNetwork, setNetworkConnected } from './network.js';
 import { icon } from './icons.js';
 import { accountUI } from './account.js';
 import { teamUI } from './teams.js';
@@ -156,10 +157,12 @@ function artifactPanels(run) {
 }
 
 function retryLinks(run) {
-  const links = [];
-  if (run.retry_of) links.push(`<a class="text-link" href="#task/${esc(run.retry_of)}">查看原失败任务</a>`);
-  for (const id of run.retry_children || []) links.push(`<a class="text-link" href="#task/${esc(id)}">查看重新运行的任务 ${esc(id.slice(-6))}</a>`);
-  return links.length ? `<div class="retry-links">${links.join(' · ')}</div>` : '';
+  return run.attempt_number > 1 ? `<p class="subtext">第 ${esc(run.attempt_number)} 次运行</p>` : '';
+}
+function showCurrentAttempt(run) {
+  if (!run.replaced_by) return false;
+  location.replace(`#task/${run.replaced_by}`);
+  return true;
 }
 
 const retryingRuns = new Set();
@@ -175,9 +178,8 @@ function detailPage(live = false) {
   const timelineScroll = $('.timeline')?.scrollTop || 0;
   const terminal = ['succeeded', 'failed', 'cancelled'].includes(run.status);
   const approvals = run.pending && ['acceptance', 'tool_approval'].includes(run.pending.kind);
-<<<<<<< HEAD
-  const review = run.pending ? `<section class="review-card"><div class="review-title">${icon('shield')}这里，需要你的判断</div><p>${esc(run.pending.question)}</p>${run.pending.prepared ? `<details><summary>查看操作对象、版本与范围</summary><pre>${esc(JSON.stringify(run.pending.prepared, null, 2))}</pre></details>` : ''}${approvals ? `<div class="review-buttons"><button class="btn primary small" data-action="approve" data-reply="yes" ${run.executing ? 'disabled' : ''}>${icon('check')}确认通过</button><button class="btn secondary small" data-action="approve" data-reply="no" ${run.executing ? 'disabled' : ''}>暂不接受</button></div>` : `<form id="reply-form"><label class="sr-only" for="human-reply">补充信息</label><textarea id="human-reply" maxlength="8000" required placeholder="补充说明，让团队继续…">${esc(reply)}</textarea><button class="btn primary small" type="submit" ${run.executing ? 'disabled' : ''}>提交并继续 ${icon('arrow')}</button></form>`}</section>` : '';
-  const markup = `<div class="page task-page" data-run-id="${esc(run.id)}"><div id="task-heading"><a class="text-link" href="#runs">← 返回任务记录</a><div class="detail-heading"><div><div class="detail-meta">${badge(run.status)}<span class="pill">${run.mode === 'demo' ? 'DEMO · 无真实模型调用' : 'LIVE · 真实模型'}</span></div><h1>${esc(run.goal)}</h1><div class="detail-meta"><span class="mono">${esc(run.id)}</span><span>${date(run.created, true)}</span><span>经验记忆${run.memory_enabled ? '已开启' : '已关闭'}</span></div></div><div class="detail-actions">${run.can_retry ? `<button class="btn primary small" data-action="retry-run" data-retry-id="${esc(run.id)}" ${retryingRuns.has(run.id) ? 'disabled' : ''}>${retryingRuns.has(run.id) ? '重新运行中…' : '重新运行'}</button>` : ''}<a class="btn secondary small" href="${apiPath(`/api/runs/${run.id}/report`)}" download>${icon('download')}导出记录</a>${run.can_retry_actions ? '<button class="btn secondary small" data-action="retry-actions">继续失败任务</button>' : ''}${run.can_repair ? '<button class="btn secondary small" data-action="repair-run">修复并复验</button>' : ''}${!terminal && !run.pending && !run.executing ? '<button class="btn primary small" data-action="continue">继续任务</button>' : ''}${!terminal ? `<button class="btn secondary small" data-action="cancel" ${run.cancelling ? 'disabled' : ''}>${icon('stop')}${run.cancelling ? '正在停止…' : '停止'}</button>` : ''}</div></div>${run.failure ? `<div class="notice error run-message">${icon('info')}<p>${esc(errorDetail(run.failure))}</p></div>` : ''}${run.mode === 'demo' ? '<div class="notice run-message">离线演示采用固定的模型决策；检索、文件交接、归档与验收均实际执行。演示结果不代表真实模型性能。</div>' : ''}</div><div class="detail-grid"><div class="detail-main">${retryLinks(run)}${review}${revisionPanel(run)}${sourceFiles(run)}<section class="panel"><div class="metric-bar"><div class="metric"><strong>${run.completed_tasks}<span class="metric-slash">/ ${run.task_count}</span></strong><span>子任务完成</span></div><div class="metric"><strong>${run.deliverable_count ?? 0}</strong><span>交付文件</span></div><div class="metric"><strong>${seconds(run.active_seconds)}</strong><span>累计活跃执行</span></div><div class="metric"><strong>${run.model_calls}</strong><span>${run.mode === 'demo' ? '模拟决策次数' : '模型请求次数'}</span></div></div><div id="task-list">${tasks(run)}</div><div class="detail-tab-note">验收范围为任务声明的检查项；代码测试结果与引用的事实准确性需要分别审阅。</div></section><section class="panel"><div class="panel-header"><span>${icon('activity')}协作轨迹</span><button class="text-link" data-action="verbose">${state.verbose ? '显示关键事件' : '包含全部决策'}</button></div><div id="timeline">${timeline(state.events, state.verbose)}</div></section></div><aside class="detail-side"><section id="collaboration-network"></section><div id="artifact-panels">${artifactPanels(run)}</div></aside></div><div class="stream-status" id="stream-status"><i class="dot"></i>${run.executing ? '正在同步执行状态' : run.pending ? '已暂停，等待你的回复' : terminal ? '记录已保存' : '执行已中断，可继续任务'}</div>${footer()}</div>`;
+  const review = run.pending ? `<section class="review-card"><div class="review-title">${icon('shield')}这里，需要你的判断</div><p>${esc(run.pending.question)}</p>${run.pending.prepared ? `<details><summary>查看操作对象、版本与范围</summary><pre>${esc(JSON.stringify(run.pending.prepared, null, 2))}</pre></details>` : ''}${approvals ? `<div class="review-buttons"><button class="btn primary small" data-action="approve" data-reply="yes" ${run.executing ? 'disabled' : ''}>${icon('check')}确认通过</button><button class="btn secondary small" data-action="approve" data-reply="no" ${run.executing ? 'disabled' : ''}>暂不接受</button></div>` : `<form id="reply-form">${questionOptions(run.pending)}<label class="sr-only" for="human-reply">补充信息</label><textarea id="human-reply" maxlength="8000" required placeholder="一句话即可，也可点击上方选项…">${esc(reply)}</textarea><button class="btn primary small" type="submit" ${run.executing ? 'disabled' : ''}>提交并继续 ${icon('arrow')}</button></form>`}</section>` : '';
+  const markup = `<div class="page task-page" data-run-id="${esc(run.id)}"><div id="task-heading"><a class="text-link" href="#runs">← 返回任务记录</a><div class="detail-heading"><div><div class="detail-meta">${badge(run.status)}<span class="pill">${run.mode === 'demo' ? 'DEMO · 无真实模型调用' : 'LIVE · 真实模型'}</span></div><h1>${esc(run.goal)}</h1><div class="detail-meta"><span class="mono">${esc(run.id)}</span><span>${date(run.created, true)}</span><span>经验记忆${run.memory_enabled ? '已开启' : '已关闭'}</span></div></div><div class="detail-actions">${run.can_retry ? `<button class="btn primary small" data-action="retry-run" data-retry-id="${esc(run.id)}" ${retryingRuns.has(run.id) ? 'disabled' : ''}>${retryingRuns.has(run.id) ? '重新运行中…' : '重新运行'}</button>` : ''}<a class="btn secondary small" href="${apiPath(`/api/runs/${run.id}/report`)}" download>${icon('download')}导出记录</a>${run.can_retry_actions ? '<button class="btn secondary small" data-action="retry-actions">继续失败任务</button>' : ''}${run.can_repair ? '<button class="btn secondary small" data-action="repair-run">修复并复验</button>' : ''}${!terminal && !run.pending && !run.executing ? '<button class="btn primary small" data-action="continue">继续任务</button>' : ''}${!terminal ? `<button class="btn secondary small" data-action="cancel" ${run.cancelling ? 'disabled' : ''}>${icon('stop')}${run.cancelling ? '正在停止…' : '停止'}</button>` : ''}</div></div>${run.failure ? `<div class="notice error run-message">${icon('info')}<p>${esc(errorDetail(run.failure))}</p></div>` : ''}${run.mode === 'demo' ? '<div class="notice run-message">离线演示采用固定的模型决策；检索、文件交接、归档与验收均实际执行。演示结果不代表真实模型性能。</div>' : ''}</div><div class="detail-grid"><div class="detail-main">${retryLinks(run)}${review}${revisionPanel(run)}${sourceFiles(run)}<section class="panel"><div class="metric-bar"><div class="metric"><strong>${run.completed_tasks}<span class="metric-slash">/ ${run.task_count}</span></strong><span>子任务完成</span></div><div class="metric"><strong>${run.deliverable_count ?? 0}</strong><span>交付文件</span></div><div class="metric"><strong>${seconds(run.active_seconds)}</strong><span>累计活跃执行</span></div><div class="metric"><strong>${run.model_calls}</strong><span>${run.mode === 'demo' ? '模拟决策次数' : '模型请求次数'}</span></div></div><div id="task-list">${tasks(run)}</div><div class="detail-tab-note">验收范围为任务声明的检查项；代码测试结果与引用的事实准确性需要分别审阅。</div></section><section class="panel"><div class="panel-header"><span>${icon('activity')}协作轨迹</span><button class="text-link" data-action="verbose">${state.verbose ? '显示关键事件' : '包含全部决策'}</button></div><div id="timeline">${timeline(state.events, state.verbose, run.team_snapshot)}</div></section></div><aside class="detail-side"><section id="collaboration-network"></section><div id="artifact-panels">${artifactPanels(run)}</div></aside></div><div class="stream-status" id="stream-status"><i class="dot"></i>${run.executing ? '正在同步执行状态' : run.pending ? '已暂停，等待你的回复' : terminal ? '记录已保存' : '执行已中断，可继续任务'}</div>${footer()}</div>`;
   const current = $('.task-page');
   if (current?.dataset.runId === run.id && $('#collaboration-network')) {
     // Keep the network and its ancestors connected: SSE must not restart node animations.
@@ -192,10 +194,6 @@ function detailPage(live = false) {
     $('#main').innerHTML = markup;
   }
   updateNetwork($('#collaboration-network'), run, state.events, {live});
-=======
-  const review = run.pending ? `<section class="review-card"><div class="review-title">${icon('shield')}这里，需要你的判断</div><p>${esc(run.pending.question)}</p>${run.pending.prepared ? `<details><summary>查看操作对象、版本与范围</summary><pre>${esc(JSON.stringify(run.pending.prepared, null, 2))}</pre></details>` : ''}${approvals ? `<div class="review-buttons"><button class="btn primary small" data-action="approve" data-reply="yes" ${run.executing ? 'disabled' : ''}>${icon('check')}确认通过</button><button class="btn secondary small" data-action="approve" data-reply="no" ${run.executing ? 'disabled' : ''}>暂不接受</button></div>` : `<form id="reply-form">${questionOptions(run.pending)}<label class="sr-only" for="human-reply">补充信息</label><textarea id="human-reply" maxlength="8000" required placeholder="一句话即可，也可点击上方选项…">${esc(reply)}</textarea><button class="btn primary small" type="submit" ${run.executing ? 'disabled' : ''}>提交并继续 ${icon('arrow')}</button></form>`}</section>` : '';
-  $('#main').innerHTML = `<div class="page task-page"><a class="text-link" href="#runs">← 返回任务记录</a><div class="detail-heading"><div><div class="detail-meta">${badge(run.status)}<span class="pill">${run.mode === 'demo' ? 'DEMO · 无真实模型调用' : 'LIVE · 真实模型'}</span></div><h1>${esc(run.goal)}</h1><div class="detail-meta"><span class="mono">${esc(run.id)}</span><span>${date(run.created, true)}</span><span>经验记忆${run.memory_enabled ? '已开启' : '已关闭'}</span></div></div><div class="detail-actions"><a class="btn secondary small" href="${apiPath(`/api/runs/${run.id}/report`)}" download>${icon('download')}导出记录</a>${run.can_retry_actions ? '<button class="btn primary small" data-action="retry-actions">继续失败任务</button>' : ''}${run.can_repair ? '<button class="btn primary small" data-action="repair-run">修复并复验</button>' : ''}${!terminal && !run.pending && !run.executing ? '<button class="btn primary small" data-action="continue">继续任务</button>' : ''}${!terminal ? `<button class="btn secondary small" data-action="cancel" ${run.cancelling ? 'disabled' : ''}>${icon('stop')}${run.cancelling ? '正在停止…' : '停止'}</button>` : ''}</div></div>${run.failure ? `<div class="notice error run-message">${icon('info')}<p>${esc(errorDetail(run.failure))}</p></div>` : ''}${run.mode === 'demo' ? '<div class="notice run-message">离线演示采用固定的模型决策；检索、文件交接、归档与验收均实际执行。演示结果不代表真实模型性能。</div>' : ''}<div class="detail-grid"><div class="detail-main">${review}${revisionPanel(run)}${sourceFiles(run)}<section class="panel"><div class="metric-bar"><div class="metric"><strong>${run.completed_tasks}<span class="metric-slash">/ ${run.task_count}</span></strong><span>子任务完成</span></div><div class="metric"><strong>${run.artifact_count}</strong><span>交付产物</span></div><div class="metric"><strong>${seconds(run.active_seconds)}</strong><span>累计活跃执行</span></div><div class="metric"><strong>${run.model_calls}</strong><span>${run.mode === 'demo' ? '模拟决策次数' : '模型请求次数'}</span></div></div><div id="task-list">${tasks(run)}</div><div class="detail-tab-note">验收范围为任务声明的检查项；代码测试结果与引用的事实准确性需要分别审阅。</div></section><section class="panel"><div class="panel-header"><span>${icon('activity')}协作轨迹</span><button class="text-link" data-action="verbose">${state.verbose ? '显示关键事件' : '包含全部决策'}</button></div><div id="timeline">${timeline(state.events, state.verbose, state.run?.team_snapshot)}</div></section></div><aside class="detail-side">${graph(run)}<section class="panel"><div class="panel-header"><span>${icon('file')}交付产物</span><small>${run.artifact_count} FILES</small></div><div class="artifact-list">${run.artifacts.length ? run.artifacts.map(artifact => `<div class="artifact-item">${icon('file')}<button class="artifact-name" data-action="artifact" data-id="${esc(artifact.id)}"><strong>${esc(artifact.path)}</strong><small>${artifact.verification === 'verified' ? '已通过声明的检查' : artifact.verification === 'superseded' ? '历史版本 · 已被修订替代' : '尚未验收'} · ${Math.max(1, Math.ceil(artifact.bytes / 1024))} KB</small></button><a class="icon-btn" href="${apiPath(`/api/runs/${run.id}/artifacts/${artifact.id}?download=true`)}" download aria-label="下载 ${esc(artifact.path)}">${icon('download')}</a></div>`).join('') : '<div class="artifact-empty">团队完成产出后，文件将出现在这里。</div>'}</div></section></aside></div><div class="stream-status" id="stream-status"><i class="dot"></i>${run.executing ? '正在同步执行状态' : run.pending ? '已暂停，等待你的回复' : terminal ? '记录已保存' : '执行已中断，可继续任务'}</div>${footer()}</div>`;
->>>>>>> b8fb6de (增加自定义agent功能)
   openTasks.forEach(id => { const item = $$('details.task-item').find(el => el.dataset.task === id); if (item) item.open = true; });
   $('#main').dataset.artifactRun = run.id;
   openArtifacts.forEach(id => { const item = $$('details[data-artifact-section]').find(el => el.dataset.artifactSection === id); if (item) item.open = true; });
@@ -212,6 +210,7 @@ function connectRun(runId, generation) {
   source.addEventListener('snapshot', event => {
     if (generation !== state.generation) { source.close(); return; }
     const snapshot = JSON.parse(event.data);
+    if (showCurrentAttempt(snapshot.run)) { source.close(); return; }
     state.run = snapshot.run;
     const seen = new Set(state.events.map(e => e.seq));
     state.events.push(...snapshot.events.filter(e => !seen.has(e.seq)));
@@ -269,7 +268,8 @@ async function documentSettings(id) {
   openModal('编辑资料 · ' + doc.name, `<form id="document-settings-form" data-id="${esc(id)}" data-revision="${esc(doc.revision)}">${documentFields(doc)}${doc.can_edit_text ? `<label class="field"><span>正文（保存后重新索引）</span><textarea id="edit-document-content" rows="10">${esc(doc.text)}</textarea></label>` : `<details class="document-preview"><summary>查看正文预览${doc.truncated ? '（部分内容）' : ''}</summary><pre>${esc(doc.text || doc.detail || '暂无正文')}</pre></details><p class="subtext">此文档可编辑说明、来源及访问范围；更新完整正文请重新上传原文件。</p>`}<div class="modal-actions"><button type="button" class="btn secondary" data-action="close-modal">取消</button><button type="submit" class="btn primary">保存资料</button></div></form>`);
 }
 
-<<<<<<< HEAD
+const teams = teamUI({ state, api, apiPath, openModal, closeModal, toast, busy, refreshWorkspace });
+
 function chatPath(channel = state.channel) {
   return `/api/chat?channel=${channel}${channel === 'group' && state.chatRun ? `&run_id=${encodeURIComponent(state.chatRun)}` : ''}`;
 }
@@ -284,7 +284,7 @@ function chatPage() {
   const filtered = state.channel === 'group' && !!state.chatRun;
   $('#main').innerHTML = `<div class="page chat-page">
     <div class="page-title"><div><div class="eyebrow">TEAM CONVERSATIONS</div><h1>和你的团队，聊一聊。</h1><p>跟进任务分工、资料交接与验证反馈，也可以单独与 Agent 交流。</p></div></div>
-    <section class="panel chat-layout">
+    ${teams.listBar()}<section class="panel chat-layout">
       <aside class="chat-channels" aria-label="会话列表"><h3>团队会话</h3>${['group', 'coordinator', 'researcher', 'coder', 'verifier'].map(a => `
         <button class="channel-button ${state.channel === a ? 'active' : ''}" data-action="channel" data-channel="${a}" aria-pressed="${state.channel === a}">
           ${agentIcon(a)}<span><strong>${roles[a].name}</strong><small>${a === 'group' ? '任务动态与共同讨论' : roles[a].label + ' · 私聊'}</small></span>
@@ -298,14 +298,6 @@ function chatPage() {
       </div>
     </section>${footer()}</div>`;
   renderChatMessages(true);
-=======
-const teams = teamUI({ state, api, apiPath, openModal, closeModal, toast, busy, refreshWorkspace });
-
-function chatPage() {
-  const teamBar = teams.listBar();
-  $('#main').innerHTML = `<div class="page"><div class="page-title"><div><div class="eyebrow">A CONVERSATION STARTS SOMETHING</div><h1>和你的团队，聊一聊。</h1><p>共同讨论想法，也可以与任意一位 Agent 单独交流。</p></div></div>${teamBar}<section class="panel chat-layout"><aside class="chat-channels"><h3>CONVERSATIONS</h3>${['group', 'coordinator', 'researcher', 'coder', 'verifier'].map(a => `<button class="channel-button ${state.channel === a ? 'active' : ''}" data-action="channel" data-channel="${a}">${agentIcon(a)}<span><strong>${roles[a].name}</strong><small>${a === 'group' ? '协调 Agent 回应' : '私密对话'}</small></span></button>`).join('')}</aside><div class="chat-room"><div class="chat-room-header"><strong>${roles[state.channel].name}</strong><small>${state.channel === 'group' ? '团队共享频道' : '仅当前 Agent 可读取'} · ${state.mode === 'demo' ? 'DEMO' : 'LIVE'}</small></div><div class="chat-messages" id="chat-messages" aria-live="polite">${chatMessages()}</div><form class="chat-composer" id="chat-form"><label class="sr-only" for="chat-input">消息</label><textarea id="chat-input" placeholder="说说你的想法…" maxlength="8000" required ${state.sending ? 'disabled' : ''}></textarea><button type="submit" class="btn primary" aria-label="发送消息" ${state.sending ? 'disabled' : ''}>${state.sending ? '<span class="spinner"></span>' : icon('arrow')}</button></form><p class="chat-hint">${state.mode === 'demo' ? '离线回复为固定示例，不调用模型。' : '此处为纯对话，不执行工具。'} 需要执行任务，请回到工作台。 · Ctrl + Enter 发送</p></div></section>${footer()}</div>`;
-  const messages = $('#chat-messages'); messages.scrollTop = messages.scrollHeight;
->>>>>>> b8fb6de (增加自定义agent功能)
 }
 function chatMessages() {
   if (!state.messages.length) return empty(state.channel === 'group' ? '团队已就位' : `${roles[state.channel].name} 已就位`, state.chatRun && state.channel === 'group' ? '该任务暂时没有协作记录。' : '发起任务后，这里将显示分工、接收、交接与完成反馈。也可以先发送一条消息。', 'chat');
@@ -370,11 +362,8 @@ async function refreshWorkspace() {
 }
 
 async function route() {
-<<<<<<< HEAD
   destroyNetwork($('#collaboration-network'));
-=======
   teams.stop();
->>>>>>> b8fb6de (增加自定义agent功能)
   const generation = ++state.generation;
   state.stream?.close(); state.stream = null;
   const [name = 'home', id] = location.hash.replace(/^#/, '').split('/');
@@ -393,6 +382,7 @@ async function route() {
     } else if (state.route === 'task') {
       const [run, events] = await Promise.all([api(`/api/runs/${encodeURIComponent(id || '')}`), api(`/api/runs/${encodeURIComponent(id || '')}/events`)]);
       if (generation !== state.generation) return;
+      if (showCurrentAttempt(run)) return;
       state.run = run; state.events = events; detailPage(); connectRun(run.id, generation);
     } else if (state.route === 'knowledge') {
       const docs = await api('/api/knowledge'); if (generation !== state.generation) return;
@@ -463,17 +453,13 @@ async function refreshRun() {
   const run = state.run, generation = state.generation;
   const updated = await api(`/api/runs/${run.id}`);
   if (generation !== state.generation) return;
+  if (showCurrentAttempt(updated)) return;
   state.run = updated; detailPage(); connectRun(run.id, generation);
 }
 
 document.addEventListener('click', async event => {
-<<<<<<< HEAD
   const row = event.target.closest('[data-run]');
   if (row && !event.target.closest('[data-action],a,button')) { location.hash = `task/${row.dataset.run}`; return; }
-=======
-  const row = event.target.closest('.table-row[data-run]');
-  if (row) { location.hash = `task/${row.dataset.run}`; return; }
->>>>>>> b8fb6de (增加自定义agent功能)
   const button = event.target.closest('[data-action]');
   if (!button || button.disabled) return;
   const action = button.dataset.action;
@@ -515,6 +501,7 @@ document.addEventListener('click', async event => {
       try {
         const result = await api(`/api/runs/${id}/retry`, {method: 'POST', body: {request_key: key}});
         sessionStorage.removeItem(storageKey);
+        await refreshWorkspace();
         location.hash = `task/${result.id}`;
       } finally { retryingRuns.delete(id); }
     });
@@ -549,11 +536,7 @@ document.addEventListener('click', async event => {
   if (action === 'artifact') return busy(button, async () => {
     const runId = state.run.id, mode = state.mode;
     const artifact = await api(`/api/runs/${runId}/artifacts/${button.dataset.id}`, { mode });
-<<<<<<< HEAD
-    openModal(artifact.download_name || artifact.path, `<div class="artifact-meta">原文件：${esc(artifact.path)}<br>${esc(artifact.status_label || '')}<br>${artifact.verification === 'verified' ? '已通过声明的检查' : artifact.verification === 'superseded' ? '历史版本 · 已被修订替代' : '未验收 · 请审阅'} · ${artifact.bytes} bytes<br>SHA256 ${esc(artifact.sha256)}</div><div class="markdown">${markdown(artifact.content)}</div>${/\.(py|js|ts|toml)$/i.test(artifact.path) ? '<p class="subtext">下载名称已调整；组合运行代码时请还原原文件名及目录结构。</p>' : ''}<div class="modal-actions"><a class="btn primary" href="${apiPath(`/api/runs/${runId}/artifacts/${artifact.id}?download=true`, mode)}" download>${icon('download')}下载文件</a></div>`);
-=======
-    openModal(artifact.path, `<div class="artifact-meta">${artifact.verification === 'verified' ? '已通过声明的检查' : artifact.verification === 'superseded' ? '历史版本 · 已被修订替代' : '未验收 · 请审阅'} · ${artifact.bytes} bytes<br>SHA256 ${esc(artifact.sha256)}</div><div class="markdown">${artifact.path.toLowerCase().endsWith('.html') ? `<pre>${esc(artifact.content)}</pre>` : markdown(artifact.content)}</div><div class="modal-actions"><a class="btn primary" href="${apiPath(`/api/runs/${runId}/artifacts/${artifact.id}?download=true`, mode)}" download>${icon('download')}下载原文件</a></div>`);
->>>>>>> b8fb6de (增加自定义agent功能)
+    openModal(artifact.download_name || artifact.path, `<div class="artifact-meta">原文件：${esc(artifact.path)}<br>${esc(artifact.status_label || '')}<br>${artifact.verification === 'verified' ? '已通过声明的检查' : artifact.verification === 'superseded' ? '历史版本 · 已被修订替代' : '未验收 · 请审阅'} · ${artifact.bytes} bytes<br>SHA256 ${esc(artifact.sha256)}</div><div class="markdown">${artifact.path.toLowerCase().endsWith('.html') ? `<pre>${esc(artifact.content)}</pre>` : markdown(artifact.content)}</div>${/\.(py|js|ts|toml)$/i.test(artifact.path) ? '<p class="subtext">下载名称已调整；组合运行代码时请还原原文件名及目录结构。</p>' : ''}<div class="modal-actions"><a class="btn primary" href="${apiPath(`/api/runs/${runId}/artifacts/${artifact.id}?download=true`, mode)}" download>${icon('download')}下载文件</a></div>`);
   });
   if (action === 'approve') return busy(button, async () => { await api(`/api/runs/${state.run.id}/resume`, { method: 'POST', body: { request_id: state.run.pending.id, reply: button.dataset.reply } }); toast(button.dataset.reply === 'yes' ? '已确认，团队将继续执行。' : '已拒绝，结果与原因将保留。'); await refreshRun(); });
   if (action === 'continue') return busy(button, async () => { await api(`/api/runs/${state.run.id}/continue`, { method: 'POST' }); await refreshRun(); });

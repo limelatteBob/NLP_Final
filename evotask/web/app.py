@@ -28,7 +28,8 @@ from starlette.background import BackgroundTask
 from ..config import Config
 from ..conversations import team_messages
 from ..outputs import describe_artifacts, grouped_artifacts
-from ..retries import existing_retry, create_retry
+from ..retries import existing_retry, create_retry, visible_runs
+from ..team_import import parse_team_document
 from ..collaboration import valid_source_url
 from ..documents import extract_document, file_digest
 from ..engine import Engine, TERMINAL
@@ -72,6 +73,11 @@ class RunInput(Payload):
     artifact_ids: list[str] = Field(default_factory=list, max_length=60)
 
 
+class TeamDocumentInput(Payload):
+    filename: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=131072)
+
+
 class TeamInput(Payload):
     name: str = Field(min_length=1, max_length=80)
     roles: dict
@@ -79,6 +85,10 @@ class TeamInput(Payload):
 
 class RetryInput(Payload):
     request_key: str = Field(min_length=16, max_length=80, pattern=r'^[A-Za-z0-9_-]+$')
+
+class RerunInput(Payload):
+    request_key: str | None = Field(default=None, min_length=16, max_length=80, pattern=r'^[A-Za-z0-9_-]+$')
+
 
 
 class ReplyInput(Payload):
@@ -462,10 +472,13 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
         presented = describe_artifacts(run, store.events(run['id']))
         groups = grouped_artifacts(presented)
         result['deliverable_count'] = len(groups['deliverable'])
+        result['replaced_by'] = run.get('replaced_by')
+        result['attempt_number'] = run.get('attempt_number', 1)
+        result['display_created'] = run.get('display_created', run['created'])
         result['retry_of'] = run.get('retry_of')
         result['retry_root'] = run.get('retry_root')
         result['retry_children'] = run.get('retry_children', [])
-        result['can_retry'] = run['status'] == 'failed' and jobs.info(store.root)['run_id'] != run['id']
+        result['can_retry'] = not run.get('replaced_by') and run['status'] == 'failed' and jobs.info(store.root)['run_id'] != run['id']
         result["artifact_count"] = len(run["artifacts"])
         result["task_count"] = len(run["tasks"])
         result["completed_tasks"] = sum(t["status"] == "succeeded" for t in run["tasks"])
@@ -605,7 +618,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
     @app.get("/api/workspace")
     def overview(request: Request, mode: Mode = "demo"):
         with storage(request, mode) as store:
-            runs = [public_run(run, store, False) for run in store.runs()]
+            runs = [public_run(run, store, False) for run in visible_runs(store.runs())]
             docs = KnowledgeBase(store).summaries()
             return {"runs": runs, "teams": Teams(store).list(), "documents": len(docs), 'knowledge_bases': KnowledgeBase(store).bases(), "job": jobs.info(store.root),
                     "agents": [{"id": a, "tools": sorted(CAPABILITIES[a]),
@@ -748,14 +761,13 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             jobs.release(target)
             raise
 
-    @app.post('/api/runs/{run_id}/retry', status_code=202)
-    def retry_run(request: Request, run_id: str, body: RetryInput, mode: Mode = 'demo'):
+    def start_retry(request, run_id, body, mode, allow_cancelled=False):
         with retry_lock, storage(request, mode) as store:
             source = get_run(store, run_id)
             found = existing_retry(store, source, body.request_key)
             if found:
                 return public_run(found, store)
-            if source['status'] != 'failed':
+            if source['status'] not in ({'failed', 'cancelled'} if allow_cancelled else {'failed'}):
                 raise HTTPException(409, '只能重新运行已经失败的任务。')
             if jobs.info(store.root)['run_id'] == run_id:
                 raise HTTPException(409, '原任务尚未停止执行，请稍后重试。')
@@ -770,7 +782,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             try:
                 with store.lock():
                     source = get_run(store, run_id)
-                    child = create_retry(store, cfg, source, body.request_key)
+                    child = create_retry(store, cfg, source, body.request_key, allow_cancelled=allow_cancelled)
                 result = public_run(child, store)
                 result['executing'] = True
                 jobs.submit(target, child['id'], cfg, event)
@@ -783,6 +795,10 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                     return JSONResponse({'detail':child['failure'], 'run_id':child['id']}, status_code=503)
                 raise
             return result
+
+    @app.post('/api/runs/{run_id}/retry', status_code=202)
+    def retry_run(request: Request, run_id: str, body: RetryInput, mode: Mode = 'demo'):
+        return start_retry(request, run_id, body, mode)
 
     @app.post("/api/runs/{run_id}/continue", status_code=202)
     def continue_run(request: Request, run_id: str, mode: Mode = "demo"):
@@ -1092,12 +1108,16 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
         finally:
             jobs.release(target)
 
+    @app.post('/api/teams/preview')
+    def preview_team(request: Request, body: TeamDocumentInput, mode: Mode = 'demo'):
+        return parse_team_document(body.filename, body.content)
+
     @app.get('/api/teams/{team_id}')
     def team_detail(request: Request, team_id: str, mode: Mode = 'demo', channel: Channel = 'group'):
         with storage(request, mode) as store:
             team = get_team(store, team_id)
             store.bind_team(team_id)
-            runs = [r for r in store.runs() if r.get('team_id') == team_id]
+            runs = [r for r in visible_runs(store.runs()) if r.get('team_id') == team_id]
             cards = []
             for run in runs[:30]:
                 card = public_run(run, store, False)
@@ -1105,7 +1125,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                             tasks=[{k: t[k] for k in ('id', 'title', 'owner', 'status', 'summary')} for t in run['tasks']])
                 cards.append(card)
             conversation = 'group' if channel == 'group' else 'private:' + channel
-            return {'team': team, 'channel': channel, 'messages': store.messages(conversation, limit=100), 'runs': cards,
+            return {'team': team, 'channel': channel, 'messages': team_messages(store, team_id=team_id) if channel == 'group' else store.messages(conversation, limit=100, metadata=True), 'runs': cards,
                     'memory': {a: store.memory(a) for a in AGENTS}, 'job': jobs.info(store.root)}
 
     @app.get('/api/teams/{team_id}/export')
@@ -1131,22 +1151,8 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                      'Content-Length': str(length)}, background=BackgroundTask(bundle.close))
 
     @app.post('/api/runs/{run_id}/rerun', status_code=202)
-    def rerun(request: Request, run_id: str, mode: Mode = 'demo'):
-        target = workspace(request, mode)
-        event = jobs.reserve(target)
-        try:
-            with storage(request, mode) as store, store.lock():
-                old = get_run(store, run_id)
-                if len(store.runs()) >= 200:
-                    raise HTTPException(429, '当前空间已达到任务上限。')
-                cfg = Config(**old['config'])
-                run = Engine(store, cfg, None).rerun(old)
-                result = public_run(run, store)
-            jobs.submit(target, run['id'], cfg, event)
-            return result
-        except Exception:
-            jobs.release(target)
-            raise
+    def rerun(request: Request, run_id: str, body: RerunInput | None = None, mode: Mode = 'demo'):
+        return start_retry(request, run_id, RetryInput(request_key=body.request_key if body and body.request_key else 'rerun-' + run_id), mode, True)
 
     @app.get("/api/agents/{agent}/memory")
     def memory(request: Request, agent: Agent, mode: Mode = "demo", team_id: str | None = None):
@@ -1157,24 +1163,21 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             return store.memory(agent)
 
     @app.get("/api/chat")
-<<<<<<< HEAD
-    def chat_history(request: Request, channel: Channel = "group", mode: Mode = "demo", run_id: str | None = None):
+    def chat_history(request: Request, channel: Channel = "group", mode: Mode = "demo", run_id: str | None = None, team_id: str | None = None):
         with storage(request, mode) as store:
             if run_id:
-                get_run(store, run_id)
+                run = get_run(store, run_id)
                 if channel != 'group':
-                    raise HTTPException(422, '任务筛选仅用于团队群聊。')
-            if channel == 'group':
-                return team_messages(store, run_id=run_id)
-            return store.messages('private:' + channel, limit=100, metadata=True)
-=======
-    def chat_history(request: Request, channel: Channel = "group", mode: Mode = "demo", team_id: str | None = None):
-        with storage(request, mode) as store:
+                    raise HTTPException(422, '任务筛选仅适用于团队群聊。')
+                if team_id and run.get('team_id') != team_id:
+                    raise HTTPException(404, '任务不属于当前团队。')
+                team_id = run.get('team_id')
             if team_id:
                 get_team(store, team_id)
-                store.bind_team(team_id)
-            return store.messages("group" if channel == "group" else "private:" + channel, limit=100)
->>>>>>> b8fb6de (增加自定义agent功能)
+            store.bind_team(team_id)
+            if channel == 'group':
+                return team_messages(store, run_id=run_id, team_id=team_id)
+            return store.messages('private:' + channel, limit=100, metadata=True)
 
     @app.post("/api/chat")
     def chat(request: Request, body: ChatInput, mode: Mode = "demo"):

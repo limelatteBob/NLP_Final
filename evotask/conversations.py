@@ -13,17 +13,18 @@ EVENT_KINDS = (
 )
 
 
-def team_messages(store, run_id=None, limit=200):
+def team_messages(store, run_id=None, limit=200, team_id=None):
     placeholders = ','.join('?' for _ in EVENT_KINDS)
-    clause = ' AND run_id=?' if run_id else ''
-    args = (*EVENT_KINDS, run_id) if run_id else EVENT_KINDS
+    clause = " AND run_id IN (SELECT id FROM runs WHERE json_extract(data, '$.team_id') IS ?)"
+    clause += ' AND run_id=?' if run_id else ''
+    args = (*EVENT_KINDS, team_id, run_id) if run_id else (*EVENT_KINDS, team_id)
     events = [dict(row) for row in store.db.execute(
         f'SELECT * FROM events WHERE kind IN ({placeholders}){clause} ORDER BY seq DESC LIMIT 800', args)]
     events.reverse()
     # Fetch operational messages around the selected event interval to enrich legacy events.
     earliest = min((e['created'] for e in events), default=0)
     raw = [dict(row) for row in store.db.execute(
-        "SELECT seq,sender,body,created FROM messages WHERE channel='group' AND created>=? ORDER BY seq DESC LIMIT 1600", (earliest - 5,))] if events else []
+        "SELECT seq,sender,body,created FROM messages WHERE channel=? AND created>=? ORDER BY seq DESC LIMIT 1600", (store.scoped_channel('group'), earliest - 5,))] if events else []
     runs = {}; result = []; consumed = set()
 
     def load(identifier):
@@ -111,7 +112,7 @@ def team_messages(store, run_id=None, limit=200):
 
     if not run_id:
         # Keep ordinary conversations, including older ones when there are few/no events.
-        recent = store.db.execute("SELECT seq,sender,body,created FROM messages WHERE channel='group' ORDER BY seq DESC LIMIT ?", (limit,))
+        recent = store.db.execute("SELECT seq,sender,body,created FROM messages WHERE channel=? ORDER BY seq DESC LIMIT ?", (store.scoped_channel('group'), limit,))
         for row in recent:
             message = dict(row)
             if message['seq'] not in consumed:

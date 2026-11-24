@@ -155,7 +155,8 @@ class RetryTests(unittest.TestCase):
         child=store.load(response.json()['id'])
         self.assertEqual(child['uploaded_files'],old['uploaded_files'])
         self.app.state.jobs.release(self.root)
-        child['status']='succeeded';store.save(child)
+        child['status']='failed';store.save(child)
+        old=child
         raw=store.root/'uploads'/upload.json()['id']/'original.txt'
         raw.unlink()
         self.assertIn('附件原件缺失',self.retry(old,'missing-upload-001').text)
