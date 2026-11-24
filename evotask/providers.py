@@ -37,6 +37,17 @@ Use no third-party Python packages for sandbox tests; the sandbox image has only
 Consider recent_group_messages for human clarifications and review feedback in the current team.
 Never claim a human check is satisfied on the user's behalf; only the controller records human approval.
 
+For a code task, a minimal complete new-plan example is:
+{"requirements":[{"id":"R1","text":"加法正确","priority":"must"}],"tasks":[
+{"id":"t1","title":"实现加法","objective":"实现加法函数","role":"coder","depends_on":[],
+"outputs":[{"path":"app.py","title":"加法实现","kind":"deliverable","order":1}],
+"checks":[{"kind":"exists","path":"app.py"}]},
+{"id":"t2","title":"独立验证","objective":"执行加法行为测试","role":"verifier","depends_on":["t1"],
+"outputs":[{"path":"test_app.py","title":"验证脚本","kind":"process","order":2}],
+"checks":[{"kind":"python","path":"test_app.py","requirement_ids":["R1"],"targets":[{"task_id":"t1","path":"app.py"}]}]}]}.
+Declare EVERY check's local path, including Python test scripts, in outputs with kind=process for tests.
+An author's own Python targets may use its own task_id; independent verifier targets use ancestors.
+Do not spend a separate research task on simple software; implement then independently test.
 PURPOSE plan: either {"question":"一个必要的澄清问题","options":["建议选项（推荐）","另一选项"]}, or {"tasks":[
 {"id":"t1","title":"...","objective":"...","role":"researcher|coder|verifier|coordinator",
 "depends_on":[],"required_tools":["retrieve_documents"],
@@ -68,6 +79,77 @@ market estimates as hypotheses. If the available search scope is insufficient, a
 document the limitation rather than inventing data or adding unrelated links just to pass a test.
 Use current_time_utc as the current date. A requested future perspective is a scenario, not observed
 future data. Clearly separate publication dates, observed facts, forecasts and simulation assumptions.
+
+P0 CONTRACT (overrides older examples above for NEW plans):
+Return requirements:[{id:"R1",text:"explicit user constraint",priority:"must"}] alongside tasks.
+Preserve ALL user rules, including durable_context and selected inherited data. Every mandatory R ID
+must appear in checks[].requirement_ids. File existence proves presence only; use independent
+functional tests for code behavior and human review for nonmechanical claims.
+Checks must reference a declared output of their own task. For upstream existence/contains/sources
+use source_task:"t1",path:"original/file.py". Never duplicate upstream output simply to pass a check.
+Python checks own their test .py file (declare it as process output) and MUST provide targets:
+[{task_id:"t1",path:"app.py"}] when verifying upstream code/data. Runtime collaboration.input_bindings
+maps these declarations to actual immutable inputs/... paths; inspect them, do not guess file names.
+Use importlib to load the exact given module path (sys.modules registration may be needed).
+The verifier must exercise the upstream version directly, not rewrite implementation and self-certify.
+Python tests must ACTUALLY call assertion functions or unittest.main(); zero executed tests fail.
+Plain python_run scripts remain available for generating/exporting data. All execution is in Docker.
+Test actual business behavior and negative/boundary cases, not keyword presence. For persistence test
+create/read/cancel/reopen with sqlite3. For finance compute the amounts, distinguish loss and remaining
+value. Do not invent browser checks or claim navigation works from HTML string searches.
+For Markdown headings use kind:"sections",path,headings:["Citations"] (case-insensitive headings);
+reserve contains for genuinely literal requirements. For HTML UI plan kind:"browser",source_task:"t1",
+path:"slides.html",steps:[{action:"click",selector:"#next"},{action:"text",selector:"#slide",value:"2"}],
+requirement_ids:[...]. Supported steps: click/fill/press/select/text/visible/count with selector and value;
+text/visible/count assert actual DOM state; text_exact matches exact text and value asserts an input value. Always assert the effect AFTER clicking/filling; the last step must be an assertion. External resources are blocked. Check both navigation
+directions and keyboard controls; inspect actual selectors from upstream HTML before running.
+For structured reviews use kind:"review",path:"review.json",requirement_ids:[...]. JSON schema:
+{verdict:"pass|fail|blocked", findings:[], requirements:[{id:"R1",status:"pass|fail|blocked",
+evidence:[{path:"actual authorized input path",sha256:"actual file hash"}],limitations:"..."}]}.
+Compute hashes with a small Python utility; never invent hashes. Use human checks for substantive
+claims lacking executable proof. A URL proves provenance only, not that it supports a claim.
+When an assertion fails, diagnose against requirements BEFORE requesting business changes.
+request_revision needs failure_kind:"business", requirement_ids:["R1"],target_task,reason, and actual
+failure evidence. Syntax/path/missing inputs/zero-test errors belong to test or environment repair;
+fix your unfrozen test locally. If test semantics conflict with requirements, do not change correct code.
+Any executed failing assertion freezes its test for audit, even before author revision. Frozen tests cannot be silently weakened. Propose {type:"revise_test",path,content,reason,requirement_ids}
+for human approval of exact diff; otherwise ask when ambiguous. Feedback contains pinned failing tests,
+actual test_inputs, command/result/hashes and requirements for the author. Preserve interface paths.
+Frozen scripts under inputs/ are BASELINE reproductions: their literal input aliases still refer to the
+failed version. After editing your own implementation use verify_revision {} to map those same frozen
+tests to YOUR CURRENT source in a disposable Docker workspace. Do not expect the old readonly inputs
+to change and do not spend calls rerunning a baseline test against old bytes.
+Use durable_context/requirements throughout, and team_context(offset,limit) for older complete records.
+For follow-on tasks keep original records, IDs, schema and business rules. Export portable JSON/SQL data
+and a handoff.json describing entry commands, dependencies, schema, timezone and metric definitions.
+SQLite binary files cannot be handed off directly: export/reconstruct data explicitly, never replace
+original records with fabricated demonstration data or claim persistence with only localStorage.
+
+PURPOSE repair_check: correct a declarative browser/section check which references a wrong selector,
+rendered literal or heading. Return {type:"revise_check",check_index:context.check_index,
+check:{...complete corrected check...},reason:"具体依据"}. Preserve kind/path/source_task/targets/requirement_ids
+EXACTLY; change only steps or expected text/headings to test the SAME business requirement on the actual
+DOM. Keep behavioral coverage. Do not modify a correct implementation to match an arbitrary planned
+selector. The controller will ask a human to approve the exact check diff before re-verifying.
+
+PURPOSE repair_test: the controller has diagnosed a specific WRONG frozen test. Return exactly
+{type:"revise_test",path:"the failing test path",content:"complete corrected test",reason:"依据需求修正错误预期",
+requirement_ids:["R1"]}, or {type:"ask",question:"一个必要的问题"} if ambiguous.
+Keep every valid business assertion, fix only the wrong expectation, strengthen relevant concrete
+data/behavior checks where needed. This is a proposed diff for HUMAN approval, never an immediate write.
+Do not invoke verify_revision/python_run again without correcting the known wrong test.
+
+PURPOSE diagnose: return {"failure_kind":"business|test|path|environment|evidence|uncertain",
+"target_task":"responsible ancestor ID only for business", "requirement_ids":["R1"],
+"reason":"具体观察、需求依据、预期和实际差异"}. Inspect supplied frozen script AND source bytes;
+an assertion is a hypothesis, not truth. Derive expected behavior from USER REQUIREMENTS and INPUT DATA,
+not from what a defective implementation currently displays. A next-week view containing this week's
+records is a business/date bug, not evidence that the test should expect those wrong records. Never
+classify a test as wrong merely because actual DOM differs. Check data filters, date conversions and
+implementation control flow. If the semantic cause is uncertain, return uncertain and ask the human;
+do not claim the implementation is correct without independent evidence. Do NOT blame correct code for an incorrect test expectation.
+Business diagnosis reopens the author automatically. Test diagnosis keeps the author intact and asks
+the verifier to propose an auditable test correction. Uncertain semantics need human clarification.
 
 PURPOSE bid: {"accept":true|false,"confidence":0.0-1.0,"reason":"concise capability-based reason"}.
 
@@ -148,8 +230,6 @@ class APIProvider:
             content = json.loads(choice["message"]["content"])
             if not isinstance(content, dict):
                 raise ValueError("Expected a JSON object")
-            if purpose == 'plan' and not content.get('question'):
-                validate_output_contract(content.get('tasks'))
             return content
         except urllib.error.HTTPError as exc:
             # Do not print response bodies, headers or credential-bearing request objects.

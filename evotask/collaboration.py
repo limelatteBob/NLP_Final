@@ -5,8 +5,10 @@ import re
 from urllib.parse import urlsplit
 
 
-ACTION_TYPES = {'tool', 'ask', 'delegate', 'finish', 'fail', 'request_revision'}
+ACTION_TYPES = {'tool', 'ask', 'delegate', 'finish', 'fail', 'request_revision', 'revise_test', 'revise_check'}
 TOOL_ARGUMENTS = {
+    'verify_revision': (set(),set()),
+    'team_context': (set(), {'offset','limit'}),
     'list_files': (set(), set()),
     'read_file': ({'path'}, {'path', 'offset', 'limit'}),
     'write_file': ({'path', 'content'}, {'path', 'content'}),
@@ -42,6 +44,10 @@ def normalize_action(value: dict) -> dict:
         value = value['action']
         if 'action' in value:
             invalid('Nested action envelopes are not supported')
+    if value.get('type')=='tool' and value.get('name') in {'finish','ask','request_revision','revise_test'} and set(value)=={'type','name','args'} and isinstance(value.get('args'),dict):
+        allowed = {'finish':{'summary','artifacts'},'ask':{'question','options'},'request_revision':{'target_task','reason','failure_kind','requirement_ids','evidence'},'revise_test':{'path','content','reason','requirement_ids'}}
+        if set(value['args']) <= allowed[value['name']]:
+            value = dict(value['args'],type=value['name'])
     kind = value.get('type')
     if not isinstance(kind, str):
         invalid('Agent action needs a string type')

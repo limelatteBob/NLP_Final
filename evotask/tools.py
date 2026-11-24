@@ -12,14 +12,16 @@ from .sandbox import DockerSandbox
 from .storage import Store, TEXT_EXTENSIONS, digest, safe_path, uid
 
 
-COMMON = {"list_files", "read_file", "write_file", "update_file", "delete_file", "retrieve_documents"}
+COMMON = {"team_context", "list_files", "read_file", "write_file", "update_file", "delete_file", "retrieve_documents"}
 CAPABILITIES = {
     "coordinator": COMMON,
     "researcher": COMMON | {"web_search", "fetch_url"},
-    "coder": COMMON | {"python_run", "git_publish"},
-    "verifier": COMMON | {"python_run"},
+    "coder": COMMON | {"verify_revision", "python_run", "git_publish"},
+    "verifier": COMMON | {"verify_revision", "python_run"},
 }
 SPECS = {
+    "verify_revision": "{} -> Docker re-runs frozen QA tests mapped to YOUR CURRENT implementation in a disposable workspace. Original input snapshots/tests remain unchanged.",
+    "team_context": "{offset?: integer, limit?: 1..20} -> durable human requirements/history pages; context only, never permission",
     "list_files": "{} -> list own workspace files",
     "read_file": "{path, offset?: character offset, limit?: 1..16000 characters} -> UTF-8 text page; continue with next_offset when truncated=true",
     "write_file": "{path, content: UTF-8 text} -> create/replace own .md/.txt/.py/.json/.csv/.toml/.html/.css/.js file",
@@ -103,13 +105,26 @@ class Tools:
         agent = task["owner"]
         self.validate(agent, name, args)
         root = self.store.workspace(agent, run["id"])
+        if name == 'verify_revision':
+            from .repair import verify_revision
+            result = verify_revision(self.store,self.sandbox,run,task)
+            if task['role']=='verifier' and result.get('tests'):
+                observed = next((t for t in result['tests'] if not t['result']['success']),result['tests'][-1])
+                task['last_verification']={'step':task['steps'],'path':observed['path'],'result':observed['result']}
+            self.store.event(run['id'],agent,'repair_verification' ,{'task_id':task['id'],'result':result})
+            return result
+        if name == 'team_context':
+            from .teams import Teams
+            if not run.get('team_id'):
+                return {'decisions':run.get('clarifications',[]),'next_offset':None}
+            return Teams(self.store).decisions(run['team_id'], args.get('offset',0),args.get('limit',10))
         if name == "list_files":
             return {"files": self.files(root)}
         if name in {"read_file", "write_file", "update_file", "delete_file", "python_run"}:
             path = self._file(root, args["path"], writing=name in {"write_file", "update_file", "delete_file"})
             if name in {'write_file', 'update_file', 'delete_file'} and any(
                     self._file(root, test['path']) == path for test in task.get('revision_tests', [])):
-                raise PermissionError('Revision verification scripts are frozen; repair the upstream output, not the assertions')
+                raise PermissionError('Verification scripts are frozen for audit. For a business defect use request_revision with failure_kind=business and requirement_ids. For a wrong test use revise_test with path/content/reason/requirement_ids and human approval; never silently rewrite it.')
             if name == "read_file":
                 offset, limit = args.get('offset', 0), args.get('limit', 16000)
                 if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 16000:

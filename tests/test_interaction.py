@@ -24,8 +24,9 @@ class ChineseProvider:
         if purpose == 'plan':
             if not context['clarifications']:
                 return {'question': '这份介绍面向哪类读者？', 'options': ['普通用户（推荐）', '技术人员']}
-            return {'tasks': [{'id': 'write', 'role': 'coder', 'title': '撰写介绍', 'objective': '编写简短的中文介绍',
-                              'checks': [{'kind': 'contains', 'path': 'intro.md', 'text': '项目介绍'}]}]}
+            return {'requirements':[{'id':'R1','text':'中文项目介绍','priority':'must'}], 'tasks': [{'id': 'write', 'role': 'coder', 'title': '撰写介绍', 'objective': '编写简短的中文介绍',
+                              'outputs':[{'path':'intro.md','title':'项目介绍','kind':'deliverable','order':1}],
+                              'checks': [{'kind': 'contains', 'path': 'intro.md', 'text': '项目介绍','requirement_ids':['R1']}]}]}
         if purpose == 'bid':
             return {'accept': True, 'confidence': 1 if context['agent'] == 'coder' else 0, 'reason': '具备文档编写能力。'}
         if not context['task']['history']:

@@ -230,6 +230,7 @@ class KnowledgeBaseTests(unittest.TestCase):
             cfg = Config(provider='demo', model='fixture')
             engine = Engine(store, cfg, ReportProvider(False), sandbox=InspectingSandbox())
             run = engine.new('legacy report')
+            run.pop('execution_schema')  # Archived records predate the diagnostic contract.
             run['revision_count'] = 2
             engine.advance(run)
             run.pop('revision_count')
@@ -251,6 +252,30 @@ class KnowledgeBaseTests(unittest.TestCase):
         repaired = self.client.get('/api/runs/' + run['id']).json()
         self.assertEqual(repaired['status'], 'running')
         self.assertEqual(len(repaired['revisions']), 1)
+
+
+    def test_repair_api_does_not_assume_new_run_is_business_failure(self):
+        from tests.test_collaboration import ReportProvider, InspectingSandbox
+        self.client.get('/api/workspace')
+        root = next((self.root / 'sessions').iterdir()) / 'demo'
+        store = Store(root)
+        try:
+            cfg = Config(provider='demo', model='fixture')
+            engine = Engine(store, cfg, ReportProvider(False), sandbox=InspectingSandbox())
+            run = engine.new('diagnostic report')
+            run['revision_count'] = 2
+            engine.advance(run)
+            run['revision_count'] = 0
+            store.save(run)
+            with patch('evotask.web.app.Jobs.submit'):
+                response = self.client.post('/api/runs/' + run['id'] + '/repair', json={})
+            self.assertEqual(response.status_code, 202, response.text)
+            repaired = store.load(run['id'])
+            self.assertEqual(repaired['diagnostic_resume_count'], 1)
+            self.assertEqual(repaired['revision_count'], 0)
+            self.assertEqual(repaired['status'], 'running')
+        finally:
+            store.close()
 
 
 if __name__ == '__main__':

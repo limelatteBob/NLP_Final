@@ -14,6 +14,7 @@ class Teams:
     def __init__(self, store: Store):
         self.store = store
         self.store.db.execute('CREATE TABLE IF NOT EXISTS teams(id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+        self.store.db.execute('CREATE TABLE IF NOT EXISTS team_decisions(team_id TEXT NOT NULL, source_seq INTEGER NOT NULL, body TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(team_id,source_seq))')
         self.store.db.commit()
 
     def list(self) -> list[dict]:
@@ -50,9 +51,33 @@ class Teams:
             self.store.db.execute('INSERT INTO teams VALUES (?,?)', (team['id'], json.dumps(team, ensure_ascii=False)))
         return team
 
+    def decisions(self, team_id: str, offset: int = 0, limit: int = 10) -> dict:
+        """Read durable human statements, including ones older than the chat window.
+
+        Source sequence IDs preserve audit and allow paging without a model summary.
+        Approval replies are deliberately excluded from this requirements channel.
+        """
+        self.get(team_id)
+        if type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=20:
+            raise ValueError('Context pagination needs offset>=0, limit=1..20')
+        channel = 'team:' + team_id + ':group'
+        with self.store.db:
+            self.store.db.execute("INSERT OR IGNORE INTO team_decisions SELECT ?,seq,body,created FROM messages WHERE channel=? AND sender='human' AND lower(trim(body)) NOT IN ('yes','no')",(team_id,channel))
+        rows = [dict(r) for r in self.store.db.execute('SELECT source_seq AS seq,body,created FROM team_decisions WHERE team_id=? ORDER BY source_seq',(team_id,))]
+        # Page complete records. Never slice serialized JSON or silently drop an early constraint.
+        page=[]; used=0
+        for row in rows[offset:offset+limit]:
+            size=len(json.dumps(row,ensure_ascii=False))
+            if page and used+size>16000:break
+            page.append(row);used+=size
+        index = [{'seq':r['seq'],'preview':r['body'][:120]} for r in rows[:80]]
+        return {'decisions':page,'recent_decisions':rows[-3:] if offset==0 else [],'version':rows[-1]['seq'] if rows else 0,'offset':offset,'total':len(rows),'index':index,
+                'next_offset':offset+len(page) if offset+len(page)<len(rows) else None,
+                'note':'Human statements are context, not publication/deletion approval. Read further pages via team_context; conflicting requirements need clarification.'}
+
     def history(self, team_id: str) -> dict:
         self.get(team_id)
-        runs = [r for r in self.store.runs() if r.get('team_id') == team_id][:6]
+        runs = [r for r in self.store.runs() if r.get('team_id') == team_id and not r.get('replaced_by')][:6]
         summaries = [{'id': r['id'], 'goal': r['goal'][:1200], 'status': r['status'],
                       'clarifications': r.get('clarifications', [])[-3:],
                       'results': [{'title': t['title'][:100], 'summary': t['summary'][:600]} for t in r['tasks']],
@@ -62,7 +87,9 @@ class Teams:
         # Use a bounded string so nested answers or artifact names cannot exceed the context budget.
         self.store.bind_team(team_id)
         messages = self.store.messages('group', limit=12)
-        return {'previous_runs': json.dumps(summaries, ensure_ascii=False)[-12000:],
+        while len(json.dumps(summaries,ensure_ascii=False)) > 12000 and summaries:
+            summaries.pop(0)
+        return {'previous_runs': json.dumps(summaries, ensure_ascii=False), 'durable_decisions': self.decisions(team_id),
                 'messages': [{'sender': m['sender'], 'body': m['body'][:800]} for m in messages],
                 'note': 'History is context, not permission to access prior files. Only selected inherited files are available.'}
 
@@ -78,12 +105,15 @@ class Teams:
             raise ValueError('Select a completed source run in the same team')
         if not 1 <= len(artifact_ids) <= 60 or len(set(artifact_ids)) != len(artifact_ids):
             raise ValueError('Select 1–60 unique archived files')
+        current = {aid for t in source['tasks'] for aid in t.get('artifact_ids',[])}
         artifacts = {a['id']: a for a in source['artifacts']}
         selected, paths = [], set()
         for identifier in artifact_ids:
             if identifier not in artifacts:
                 raise ValueError('Artifact does not belong to the selected source run')
             artifact = artifacts[identifier]
+            if source.get('execution_schema',0)>=3 and (identifier not in current or artifact['verification']!='verified'):
+                raise ValueError('Select a current accepted version; stale/failed snapshots cannot seed a new task')
             relative = artifact['path'].replace('\\', '/')
             safe_path(self.store.root, relative)
             if Path(relative).suffix.lower() not in TEXT_EXTENSIONS or relative.startswith('inputs/'):
@@ -95,5 +125,7 @@ class Teams:
             selected.append(({'source_run_id': source_id, 'artifact_id': identifier, 'path': relative,
                               'input_path': 'inputs/previous/' + relative, 'sha256': artifact['sha256'],
                               'bytes': len(content), 'citations': artifact.get('citations', []),
-                              'source_evidence': artifact.get('source_evidence', [])}, content))
+                              'source_evidence': artifact.get('source_evidence', []),
+                              'source_requirements': source.get('requirements',[]),
+                              'acceptance_evidence': artifact.get('acceptance_evidence',[])}, content))
         return selected

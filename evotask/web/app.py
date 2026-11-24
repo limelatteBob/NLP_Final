@@ -751,8 +751,18 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                 pending = run["pending"]
                 if not pending or pending["id"] != body.request_id:
                     raise HTTPException(409, "该请求已处理或已失效，请刷新任务。")
-                if pending["kind"] in {"acceptance", "tool_approval"} and body.reply not in {"yes", "no"}:
+                test_feedback = pending['kind'] in {'test_revision','check_revision'} and body.reply.startswith('no:') and bool(body.reply[3:].strip())
+                quality_feedback = pending['kind'] in {'acceptance','test_revision','check_revision'} and body.reply.startswith('revise:') and bool(body.reply[7:].strip())
+                if pending["kind"] in {"acceptance", "tool_approval", "test_revision", "check_revision"} and body.reply not in {"yes", "no"} and not quality_feedback and not test_feedback:
                     raise HTTPException(422, "审批只能回复 yes 或 no。")
+                if quality_feedback:
+                    feedback = body.reply[7:].strip()
+                    if '|' in feedback:
+                        target_id, feedback = feedback.split('|', 1)
+                        if not any(t['id'] == target_id for t in run['tasks']):
+                            raise HTTPException(422, "修改对象不存在。")
+                    if not feedback.strip():
+                        raise HTTPException(422, "请填写需要修改的具体问题。")
                 if not body.reply.strip():
                     raise HTTPException(422, "回复不能为空。")
             jobs.submit(target, run_id, Config(**run["config"]), event, body)
@@ -1122,7 +1132,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             for run in runs[:30]:
                 card = public_run(run, store, False)
                 card.update(pending=run['pending'], artifacts=run['artifacts'],
-                            tasks=[{k: t[k] for k in ('id', 'title', 'owner', 'status', 'summary')} for t in run['tasks']])
+                            tasks=[{k: t[k] for k in ('id', 'title', 'role', 'owner', 'status', 'summary', 'depends_on')} for t in run['tasks']])
                 cards.append(card)
             conversation = 'group' if channel == 'group' else 'private:' + channel
             return {'team': team, 'channel': channel, 'messages': team_messages(store, team_id=team_id) if channel == 'group' else store.messages(conversation, limit=100, metadata=True), 'runs': cards,

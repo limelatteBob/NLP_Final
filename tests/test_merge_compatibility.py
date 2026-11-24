@@ -33,6 +33,8 @@ class MergeCompatibilityTests(unittest.TestCase):
         artifact['verification'] = 'verified'
         first['status'] = 'succeeded'
         self.store.save(first)
+        first.pop('execution_schema', None)  # This test models an archived pre-contract record.
+        self.store.save(first)
         source = self.engine.new('Extend', team_id=team['id'], source_run_id=first['id'], artifact_ids=[artifact['id']])
         source['status'] = 'failed'
         self.store.save(source)
