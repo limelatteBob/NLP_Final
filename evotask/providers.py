@@ -125,6 +125,44 @@ and a handoff.json describing entry commands, dependencies, schema, timezone and
 SQLite binary files cannot be handed off directly: export/reconstruct data explicitly, never replace
 original records with fabricated demonstration data or claim persistence with only localStorage.
 
+PURPOSE review_test: independently review a NEW test BEFORE execution. Return
+{verdict:"pass|revise|uncertain",reason:"brief conclusion",cases:[{assertion_ids:["A1"],requirement_ids:["R1"],
+input:"concrete fixture values",expected:"result derived from user rules",asserted:"what the script expects",
+reason:"brief calculation or rule",consistent:true|false}]}.
+Inspect the ENTIRE supplied script, including fixture arithmetic, interval boundaries, timezone/date
+conversion and test setup/API usage. Never infer the correct answer from implementation behavior.
+The controller supplies assertion_batch with stable IDs and exact source. Independently calculate
+EVERY supplied assertion's expected value using the full script's fixtures. Return 1–6 concise cases
+whose assertion_ids cover ALL IDs in this batch; never sample only easy examples or invent IDs.
+Only cover this batch (other assertions are reviewed separately); report every
+contradiction found. pass requires correct expectations AND executable test setup; revise means a
+specific test defect, uncertain means the supplied business rules cannot determine an expectation.
+revise MUST include at least one case with consistent:false identifying the actual wrong assertion,
+setup error or explicitly required missing behavior. Do not reject correct tests for optional redundant
+cases. The original goal and human clarifications outrank a planner's paraphrase: preserve type and
+valid-input preconditions. Do not invent requirements for inputs explicitly outside that contract.
+Use keyword arguments where Python APIs require them (e.g. tzinfo), and actual fixture values rather
+than guessed totals. Do not excuse wrong assertions because other cases are correct. This review is
+not runtime proof: Docker must still execute the corrected tests and exercise declared targets.
+For date/group/total assertions, independently enumerate each record's converted date, inclusion,
+status and contribution, then show the sum in the case reason. Recompute from scratch, never copy
+the asserted total. A shallow list copy does not detect changes to nested dictionaries; use a deep
+snapshot for such an immutability assertion. The verdict must agree with every case.consistent flag.
+
+PURPOSE review_diagnosis: independently CHECK a proposed diagnosis, which may be wrong. Return
+{failure_kind:"business|test|path|environment|evidence|uncertain",target_task:"source task ID for business",
+requirement_ids:["R1"],reason:"brief evidence-based conclusion",case:{input:"concrete failing input",
+expected:"independently derived requirement result",actual:"observed implementation behavior",
+asserted:"test expectation",requirement_quote:"EXACT short substring of a user requirement or goal",
+implementation_matches_requirement:false,test_matches_requirement:true}}.
+For business, the flags MUST be false/true; for test, true/false. If BOTH code and test are wrong,
+or evidence is insufficient, use uncertain instead of forcing either category. For path/environment/
+evidence/uncertain, case may be omitted. Trace the concrete input through source AND the assertion;
+do not merely agree with the candidate. A TypeError inside test setup belongs to the test; rejected
+valid input in the implementation belongs to business. Never weaken correct tests to accept a bug.
+Original user goal/clarifications outrank the planned requirements summary; do not broaden a scoped
+rule such as "invalid time returns False" into handling arbitrary invalid containers or objects.
+
 PURPOSE repair_check: correct a declarative browser/section check which references a wrong selector,
 rendered literal or heading. Return {type:"revise_check",check_index:context.check_index,
 check:{...complete corrected check...},reason:"具体依据"}. Preserve kind/path/source_task/targets/requirement_ids
@@ -168,6 +206,11 @@ Tool names belong in name, never in type. To write a document return
 Tool argument descriptions in context.tools describe args only, not the whole action.
 After an action format error, use its schema guidance to correct the next action; do not repeat it.
 Actions and tool results are persisted. Use observations and workspace listings to avoid repeat calls.
+Use execution_readiness before execution: create missing local test scripts before python_run and
+read the exact authorized input_bindings paths. Missing local tests are not missing user attachments.
+verify_revision is available ONLY after a frozen repair package exists; first checks use python_run.
+If test expectation precheck rejects an unfrozen script, correct the stated expectation/setup error
+locally and retry, retaining valid coverage. Do not reopen the author or ask for already supplied files.
 Delegate only a bounded independent subtask; wait for its artifacts, then continue your own work.
 Use input file paths exactly as provided. You may read inputs but cannot modify the inputs/ directory.
 Uploaded documents are normalized to text. If read_file returns truncated=true, read subsequent

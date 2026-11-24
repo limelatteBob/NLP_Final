@@ -10,6 +10,7 @@ from .network import fetch_text, search_web
 from .retrieval import KnowledgeBase
 from .sandbox import DockerSandbox
 from .storage import Store, TEXT_EXTENSIONS, digest, safe_path, uid
+from .verification_guard import require_file, repair_ready, ExecutionPreflightError
 
 
 COMMON = {"team_context", "list_files", "read_file", "write_file", "update_file", "delete_file", "retrieve_documents"}
@@ -82,6 +83,7 @@ class Tools:
     def prepare(self, run: dict, task: dict, name: str, args: dict) -> dict | None:
         agent = task["owner"]
         self.validate(agent, name, args)
+        self.preflight(run, task, name, args)
         root = self.store.workspace(agent, run["id"])
         if name == "delete_file":
             path = self._file(root, args["path"], writing=True)
@@ -101,9 +103,19 @@ class Tools:
             return {"remote": remote, "branch": branch, "artifacts": artifacts, "operation_id": uid("op")}
         return None
 
+    def preflight(self, run: dict, task: dict, name: str, args: dict) -> None:
+        self.validate(task['owner'], name, args)
+        if name in {'python_run', 'read_file', 'update_file'}:
+            require_file(self, run, task, args['path'], python=name == 'python_run', bounded=name != 'read_file')
+        if name == 'verify_revision' and not repair_ready(task):
+            raise ExecutionPreflightError('verify_revision is not ready: no frozen repair package for this task. '
+                'For a first verification, create the declared local test script, read authorized input_bindings, '
+                'then use python_run. Do not request the existing source again or reopen its author.')
+
     def execute(self, run: dict, task: dict, name: str, args: dict, prepared: dict | None = None) -> dict:
         agent = task["owner"]
         self.validate(agent, name, args)
+        self.preflight(run, task, name, args)
         root = self.store.workspace(agent, run["id"])
         if name == 'verify_revision':
             from .repair import verify_revision

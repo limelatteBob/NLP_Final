@@ -19,6 +19,7 @@ from .storage import AGENTS, Store, atomic_json, digest, safe_path, uid
 from .tools import CAPABILITIES, Tools
 from .teams import Teams
 from .interaction import INTERACTION_POLICY, chinese_prose, clarification, validate_deliverable, validate_plan_language
+from . import verification_guard as guard
 
 
 
@@ -233,7 +234,7 @@ class Engine:
                "human_wait_seconds": 0.0, "clarifications": [], "memory_enabled": memory,
                "initial_memory_hashes": {a: digest(json.dumps(self.store.memory(a), sort_keys=True).encode()) for a in AGENTS},
                "initial_inputs": [], "failure": None, "finish_recorded": False, "require_review": require_review,
-               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2, "execution_schema": 3, "requirements": [],
+               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2, "execution_schema": 4, "requirements": [],
                'team_id': team_id, 'team_snapshot': team, 'group_history': history,
                'inherited_inputs': [], 'input_manifest': []}
         self.bind_run(run)
@@ -833,9 +834,12 @@ class Engine:
         source_paths = list(evidence.get('result',{}).get('verification',{}).get('targets',{})) or [b['path'] for b in task.get('input_bindings',[]) if b['path'] in observed][:5]
         for path in [evidence['path']] + source_paths:
             source = self.tools._file(root,path)
-            if source.is_file(): files[path] = source.read_text(encoding='utf-8')[:12000]
+            if source.is_file():
+                guard.require_file(self.tools, run, task, path)
+                files[path] = source.read_text(encoding='utf-8')
         decision = self.model(run,'diagnose',{'agent':task['owner'],'task':task,'failure':evidence,
             'files':files,'collaboration':self.collaboration_context(run,task),'goal':run['goal']})
+        decision = guard.review_diagnosis(self, run, task, decision, files, evidence)
         category = decision.get('failure_kind')
         if category not in {'business','test','path','environment','evidence','uncertain'} or not isinstance(decision.get('reason'),str):
             raise ValueError('Diagnosis requires failure_kind and evidence-based reason')
@@ -859,6 +863,9 @@ class Engine:
             if proposal['type']=='revise_test' and proposal.get('path')!=evidence['path']:
                 raise ValueError('Test correction must target the observed failing script')
             self.action(run,task,proposal)
+        elif guard.enabled(self, run) and category in {'uncertain', 'evidence'}:
+            self.wait(run, task, 'clarification', '验收依据仍不明确，请确认：' + decision['reason'][:700],
+                      {'type': 'ask', 'question': decision['reason'][:700]})
         else:
             task['history'].append({'event':'repair_guidance' ,'guidance':
                 'Wrong frozen test: use revise_test with exact corrected content/reason/requirement_ids; preserve valid business assertions. Path/environment: fix inputs/test harness, never reopen author without evidence. Uncertain: ask human.'})
@@ -872,15 +879,19 @@ class Engine:
 
     def verify(self, run: dict, task: dict, check: dict) -> dict:
         root = self.store.workspace(task['owner'], run['id'])
+        script = guard.require_file(self.tools, run, task, check['path'], python=True)
         if run.get('execution_schema',0) < 3 or not hasattr(self.tools.sandbox,'verify'):
             return self.tools.sandbox.execute(root, check['path'])
         targets = [t['path'] if t['task_id']==task['id'] else self.resolve_input(task,t['task_id'],t['path']) for t in check.get('targets',[])]
+        for target in targets:
+            guard.require_file(self.tools, run, task, target, bounded=False)
         expected = file_manifest(root, targets)
         for binding in task.get('input_bindings',[]):
             if binding['path'] in expected:
                 artifact = next(a for a in run['artifacts'] if a['id']==binding['artifact_id'])
                 if expected[binding['path']] != artifact['sha256']:
                     raise ValueError('Authorized input snapshot changed: '+binding['path'])
+        guard.review_test(self, run, task, check, script, expected)
         test_snapshot = self.store.archive(run,task['owner'],check['path'],task['id'],origin='verification')
         result = self.tools.sandbox.verify(root, check['path'])
         result['test_artifact'] = {'id':test_snapshot['id'],'sha256':test_snapshot['sha256']}
@@ -902,6 +913,11 @@ class Engine:
         import difflib
         if task['role'] != 'verifier':
             raise ValueError('Only the independent verifier may propose a frozen test correction')
+        if guard.enabled(self, run) and guard.reviewed_kind(run, task) != 'test':
+            if not task.get('last_verification'):
+                raise ValueError('A test revision requires an observed failure and reviewed diagnosis')
+            self.diagnose_verification(run, task)
+            return
         path = action.get('path')
         if not any(f['path']==path for f in task.get('revision_tests',[])):
             raise ValueError('revise_test requires an existing frozen test; repair unfrozen test scripts using file tools')
@@ -935,6 +951,11 @@ class Engine:
                           'fail': ('reason',), 'request_revision': ('reason',)}.get(kind, ()):
                 chinese_prose(action.get(field, ''), field)
         if kind == 'revise_check':
+            if guard.enabled(self, run) and guard.reviewed_kind(run, task) != 'test':
+                if not task.get('last_verification'):
+                    raise ValueError('Check revision requires observed evidence and reviewed diagnosis')
+                self.diagnose_verification(run, task)
+                return
             from .check_revision import propose
             propose(self,run,task,action)
             return
@@ -942,6 +963,13 @@ class Engine:
             self.propose_test_revision(run, task, action)
             return
         if kind == 'request_revision':
+            if guard.enabled(self, run):
+                if not task.get('last_verification'):
+                    raise ValueError('Run a concrete check before requesting automatic business repair')
+                if guard.reviewed_kind(run, task) != 'business':
+                    self.diagnose_verification(run, task)
+                    return
+                action = dict(task['reviewed_diagnosis']['decision'], type='request_revision')
             if run.get('execution_schema', 0) >= 3:
                 if action.get('failure_kind') != 'business' or not action.get('requirement_ids'):
                     raise ValueError('Diagnose first: business revision needs failure_kind=business and requirement_ids. Fix test/path errors locally; use revise_test for frozen tests; ask when uncertain.')
@@ -1093,6 +1121,9 @@ class Engine:
                                'collaboration': self.collaboration_context(run, task),
                                'knowledge_base_ids': run.get('knowledge_base_ids'),
                                "clarifications": run["clarifications"]}
+                    context['execution_readiness'] = guard.readiness(self.tools, run, task)
+                    if not context['execution_readiness']['verify_revision_ready']:
+                        context['tools'].pop('verify_revision', None)
                     action = self.model(run, "act", context)
                     action = self.normalize_decision(run, task, action)
                     self.action(run, task, action)
