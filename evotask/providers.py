@@ -5,6 +5,7 @@ import os
 import urllib.error
 import urllib.request
 
+from .outputs import validate_output_contract
 from .config import Config
 from .network import NoRedirect
 from .interaction import INTERACTION_POLICY

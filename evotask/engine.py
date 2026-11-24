@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .outputs import validate_outputs
 from .config import Config
 from .collaboration import ACTION_HELP, ancestors, descendants, normalize_action, urls_in
 from .providers import ProviderUnavailable
@@ -194,13 +195,7 @@ class Engine:
 
     def new(self, goal: str, inputs: list[Path] | None = None, memory: bool = True, require_review: bool = False,
             *, input_names: list[str] | None = None, knowledge_base_ids: list[str] | None = None,
-<<<<<<< HEAD
-            persist: bool = True, run_id: str | None = None) -> dict:
-        if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 12000:
-            raise ValueError("Goal must contain 1–12000 characters")
-        self.tools.kb.validate_bases(knowledge_base_ids)
-        run = {"id": run_id or uid("run"), "goal": goal, "status": "planning", "created": time.time(), "ended": None,
-=======
+            persist: bool = True, run_id: str | None = None,
             team_id: str | None = None, source_run_id: str | None = None, artifact_ids: list[str] | None = None,
             team_snapshot: dict | None = None, pinned_inputs: list | None = None) -> dict:
         if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 12000:
@@ -213,22 +208,17 @@ class Engine:
         self.store.bind_team(team_id)
         history = teams.history(team_id) if team_id else None
         inherited = pinned_inputs if pinned_inputs is not None else teams.inputs(team_id, source_run_id, artifact_ids or [])
-        run = {"id": uid("run"), "goal": goal, "status": "planning", "created": time.time(), "ended": None,
->>>>>>> b8fb6de (增加自定义agent功能)
+        run = {"id": run_id or uid("run"), "goal": goal, "status": "planning", "created": time.time(), "ended": None,
                "config": self.config.snapshot(), "config_hash": self.config.fingerprint(),
                "mode": "demo" if self.config.provider == "demo" else "live", "tasks": [], "artifacts": [],
                "pending": None, "inflight": None, "steps": 0, "model_calls": 0, "active_seconds": 0.0,
                "human_wait_seconds": 0.0, "clarifications": [], "memory_enabled": memory,
                "initial_memory_hashes": {a: digest(json.dumps(self.store.memory(a), sort_keys=True).encode()) for a in AGENTS},
                "initial_inputs": [], "failure": None, "finish_recorded": False, "require_review": require_review,
-<<<<<<< HEAD
-               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2}
-=======
-               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [],
+               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2,
                'team_id': team_id, 'team_snapshot': team, 'group_history': history,
                'inherited_inputs': [], 'input_manifest': []}
         self.bind_run(run)
->>>>>>> b8fb6de (增加自定义agent功能)
         for index, source in enumerate(inputs or []):
             if source.suffix.lower() not in {".md", ".txt"} or not source.is_file():
                 raise ValueError("Task inputs must be existing .md/.txt files")
@@ -241,15 +231,8 @@ class Engine:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
             run["initial_inputs"].append(relative)
-<<<<<<< HEAD
-            run.setdefault("input_manifest", []).append({"path": relative, "name": name})
-        if persist:
-            self.store.message("group", "human", goal)
-            self.store.save(run)
-            self.emit(run, "coordinator", "run_created", {"mode": run["mode"], "config_hash": run["config_hash"]})
-=======
             with source.open('rb') as stream:
-                run['input_manifest'].append({'input_path': relative, 'sha256': hashlib.file_digest(stream, 'sha256').hexdigest()})
+                run['input_manifest'].append({'path': relative, 'name': name, 'input_path': relative, 'sha256': hashlib.file_digest(stream, 'sha256').hexdigest()})
         for metadata, content in inherited:
             relative = metadata['input_path']
             if (not relative.startswith('inputs/') or relative in run['initial_inputs']
@@ -265,10 +248,10 @@ class Engine:
             run['input_manifest'].append(copy.deepcopy(metadata))
             if metadata.get('source_run_id'):
                 run['inherited_inputs'].append(copy.deepcopy(metadata))
-        self.store.message("group", "human", goal)
-        self.store.save(run)
-        self.emit(run, "coordinator", "run_created", {"mode": run["mode"], "config_hash": run["config_hash"]})
->>>>>>> b8fb6de (增加自定义agent功能)
+        if persist:
+            self.store.message("group", "human", goal)
+            self.store.save(run)
+            self.emit(run, "coordinator", "run_created", {"mode": run["mode"], "config_hash": run["config_hash"]})
         return run
 
     def rerun(self, previous: dict) -> dict:
@@ -616,18 +599,14 @@ class Engine:
             raise ValueError("Duplicate artifact path")
         root = self.store.workspace(task["owner"], run["id"])
         for path in paths:
-<<<<<<< HEAD
-            self.tools._file(root, path, writing=True)
-        required_outputs = {o['path'] for o in task.get('outputs', []) if o['kind'] == 'deliverable'}
-        if not required_outputs <= set(paths):
-            raise ValueError('finish must export every declared deliverable: ' + ', '.join(sorted(required_outputs - set(paths))))
-=======
             target = self.tools._file(root, path, writing=True)
             if self.config.provider != 'demo' and not frozen:
                 if target.stat().st_size > self.config.max_file_bytes:
                     raise ValueError('交付文件超过配置的大小限制。')
                 validate_deliverable(target)
->>>>>>> b8fb6de (增加自定义agent功能)
+        required_outputs = {o['path'] for o in task.get('outputs', []) if o['kind'] == 'deliverable'}
+        if not required_outputs <= set(paths):
+            raise ValueError('finish must export every declared deliverable: ' + ', '.join(sorted(required_outputs - set(paths))))
         if frozen:
             artifacts = []
             for approved_artifact in frozen:
