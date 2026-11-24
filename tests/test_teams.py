@@ -231,6 +231,9 @@ class TeamWebTests(unittest.TestCase):
             self.assertEqual(waiting['pending']['kind'], 'acceptance')
             self.client.post(f"/api/runs/{run['id']}/resume", json={'team_id': team['id'], 'request_id': waiting['pending']['id'], 'reply': 'yes'})
             done = self.wait_idle(run['id'])
+        card = next(r for r in self.client.get('/api/teams/' + team['id']).json()['runs'] if r['id'] == run['id'])
+        self.assertEqual({t['id']: t['artifact_ids'] for t in card['tasks']},
+                         {t['id']: t['artifact_ids'] for t in done['tasks']})
         artifact = next(a for a in done['artifacts'] if a['path'] == 'slides.html')
         download = self.client.get(f"/api/runs/{run['id']}/artifacts/{artifact['id']}?download=true")
         self.assertEqual(download.content, SLIDES.encode())

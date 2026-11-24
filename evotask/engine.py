@@ -387,7 +387,7 @@ class Engine:
                     self.record_sources(run, source_task, action.get('name'), action.get('args', {}), result)
             evidence.extend(e for e in source_task.get('source_evidence', []) if e not in evidence)
 
-    def request_revision(self, run: dict, verifier: dict, reason: str, target_id: str | None = None) -> dict:
+    def request_revision(self, run: dict, verifier: dict, reason: str, target_id: str | None = None, *, origin: str | None = None) -> dict:
         """Reopen the author and descendants; retain contracts, frozen tests and all snapshots."""
         if verifier['role'] != 'verifier' or not verifier['owner']:
             raise ValueError('Only an assigned verifier can request an upstream revision')
@@ -412,6 +412,9 @@ class Engine:
         number = run.get('revision_count', 0) + 1
         feedback = {'round': number, 'from_task': verifier['id'], 'target_task': target['id'], 'reason': reason[:4000],
                     'verifier_objective': verifier['objective'], 'checks': verifier['checks'], 'frozen_tests': frozen[:], 'created': time.time()}
+        # Include attribution before any event or saved snapshot exposes the revision.
+        if origin is not None:
+            feedback['origin'] = origin
         # Reverse handoff is explicitly authorized and pinned; ancestor lookup alone cannot deliver QA files.
         target.setdefault('repair_input_ids', []).extend(f['artifact_id'] for f in frozen if f['artifact_id'] not in target.get('repair_input_ids', []))
         feedback['failure_evidence'] = copy.deepcopy(verifier.get('last_verification'))
@@ -1166,8 +1169,7 @@ class Engine:
                 reviewer = next((t for t in run['tasks'] if t['role']=='verifier' and t.get('owner') and target_id in ancestors(run['tasks'],t['id'])),None)
                 if not reviewer:
                     raise ValueError('Selected target has no independent reviewer; choose its own review or provide clarification')
-                feedback = self.request_revision(run,reviewer,'人工质量反馈：'+reason,target_id)
-                feedback['origin']='human_quality_feedback'
+                self.request_revision(run,reviewer,'人工质量反馈：'+reason,target_id,origin='human_quality_feedback')
                 self.store.message('group','human','质量反馈（'+target_id+'）：'+reason)
                 run['clarifications'].append({'question':'交付验收修改意见','answer':reason,'task_id':target_id})
                 self.emit(run,'human','quality_revision_requested',{'task_id':target_id,'reason':reason,'request_id':request_id})

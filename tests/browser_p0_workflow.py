@@ -72,10 +72,17 @@ def main():
                             assert response.value.status==202,response.value.text()
                             deadline=time.monotonic()+10
                             while True:
-                                with closing(Store(root)) as store:changed=store.load(run['id'])
-                                if changed.get('revision_count')==1:break
-                                if time.monotonic()>deadline:raise AssertionError(changed)
+                                status=context.request.get(url+'/api/runs/'+run['id']+'?mode=demo')
+                                assert status.status==200,status.text()
+                                public=status.json()
+                                # HTTP 202 and revision_count=1 can precede the worker's final save.
+                                # Wait for the job to finish; do not hide missing metadata with .get().
+                                if not public['executing']:
+                                    with closing(Store(root)) as store:changed=store.load(run['id'])
+                                    break
+                                if time.monotonic()>deadline:raise AssertionError(public)
                                 time.sleep(.05)
+                            assert changed['revision_count']==1,changed
                             assert changed['pending'] is None
                             assert changed['revisions'][0]['target_task']=='author'
                             assert changed['revisions'][0]['origin']=='human_quality_feedback'
@@ -84,6 +91,7 @@ def main():
                             csrf=context.request.get(url+'/api/session').json()['csrf']
                             old=context.request.post(url+'/api/runs/'+run['id']+'/resume?mode=demo',data={'request_id':request_id,'reply':'yes'},headers={'X-EvoTask-CSRF':csrf})
                             assert old.status==409,old.text()
+                            assert '该请求已处理或已失效' in old.json()['detail'],old.text()
                             checks.append(surface+'/'+kind+': exact target, draft preserved, real API revision, old approval rejected')
                 assert not errors,errors
                 browser.close()

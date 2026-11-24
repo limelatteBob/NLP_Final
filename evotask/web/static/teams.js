@@ -104,7 +104,8 @@ export function teamUI({ state, api, apiPath, openModal, closeModal, toast, busy
     clearTimeout(timer); timer = setTimeout(refresh, 2500);
   }
   function inheritance(run) {
-    openModal('基于交付文件发起新任务', `<form id="team-inherit-form" data-run="${esc(run.id)}"><p class="subtext">所选归档将按原始路径与字节复制到新任务的只读输入目录。请选择每个路径的一个版本；旧交付不会被修改。</p><div class="team-file-picker">${run.artifacts.map(a => `<label><input type="checkbox" name="artifact" value="${esc(a.id)}" ${a.verification === 'verified' && run.tasks.some(t => t.artifact_ids.includes(a.id)) && run.artifacts.filter(b => b.path === a.path && run.tasks.some(t => t.artifact_ids.includes(b.id))).length === 1 ? 'checked' : ''}><span>${esc(a.path)}<small>${esc(a.verification)} · ${esc(a.sha256.slice(0, 12))} · ${esc(a.id)}</small></span></label>`).join('')}</div><label class="field"><span>下一轮任务</span><textarea id="team-next-goal" rows="6" maxlength="12000" required></textarea></label><div class="modal-actions"><button type="button" class="btn secondary" data-action="close-modal">取消</button><button type="submit" class="btn primary">创建并启动新任务</button></div></form>`);
+    const currentIds = new Set((run.tasks || []).flatMap(task => task.artifact_ids || []));
+    openModal('基于交付文件发起新任务', `<form id="team-inherit-form" data-source-run="${esc(run.id)}" data-team="${esc(run.team_id)}"><p class="subtext">所选归档将按原始路径与字节复制到新任务的只读输入目录。请选择每个路径的一个版本；旧交付不会被修改。</p><div class="team-file-picker">${run.artifacts.map(a => `<label><input type="checkbox" name="artifact" value="${esc(a.id)}" ${a.verification === 'verified' && currentIds.has(a.id) && run.artifacts.filter(b => b.path === a.path && currentIds.has(b.id)).length === 1 ? 'checked' : ''}><span>${esc(a.path)}<small>${esc(a.verification)} · ${esc(a.sha256.slice(0, 12))} · ${esc(a.id)}</small></span></label>`).join('')}</div><label class="field"><span>下一轮任务</span><textarea id="team-next-goal" rows="6" maxlength="12000" required></textarea></label><div class="modal-actions"><button type="button" class="btn secondary" data-action="close-modal">取消</button><button type="submit" class="btn primary">创建并启动新任务</button></div></form>`);
   }
   document.addEventListener('click', e => {
     const button = e.target.closest('[data-team-action]'); if (!button || button.disabled) return;
@@ -161,7 +162,7 @@ export function teamUI({ state, api, apiPath, openModal, closeModal, toast, busy
       } else if (form.id === 'team-inherit-form') {
         const artifact_ids = [...form.querySelectorAll('[name=artifact]:checked')].map(el => el.value);
         if (!artifact_ids.length) throw new Error('请至少选择一个归档文件。');
-        await api('/api/runs', {method: 'POST', body: {team_id: current.team.id, goal: $('#team-next-goal').value, source_run_id: form.dataset.run, artifact_ids, review: true}});
+        await api('/api/runs', {method: 'POST', body: {team_id: form.dataset.team, goal: $('#team-next-goal').value, source_run_id: form.dataset.sourceRun, artifact_ids, review: true}});
         closeModal();
       } else {
         const reply = button.value === 'revise' ? 'revise:' + form.querySelector('[name=quality-target]').value + '|' + form.querySelector('[name=quality-feedback]').value.trim() : button.name === 'reply' ? button.value : form.querySelector('textarea[name=reply]').value.trim();
