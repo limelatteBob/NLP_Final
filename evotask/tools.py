@@ -22,7 +22,7 @@ CAPABILITIES = {
 SPECS = {
     "list_files": "{} -> list own workspace files",
     "read_file": "{path, offset?: character offset, limit?: 1..16000 characters} -> UTF-8 text page; continue with next_offset when truncated=true",
-    "write_file": "{path, content: UTF-8 text} -> create/replace own .md/.txt/.py/.json/.csv/.toml file",
+    "write_file": "{path, content: UTF-8 text} -> create/replace own .md/.txt/.py/.json/.csv/.toml/.html/.css/.js file",
     "update_file": "{path, old: exact unique text, new: replacement} -> replace once",
     "delete_file": "{path} -> approval required, version pinned deletion",
     "retrieve_documents": "{query, limit?: 1..8} -> authorized passages with citation IDs",
@@ -36,15 +36,16 @@ SPECS = {
 class Tools:
     def __init__(self, store: Store, config: Config, sandbox=None):
         self.store, self.config = store, config
+        self.capabilities = CAPABILITIES
         self.kb = KnowledgeBase(store)
         self.sandbox = sandbox or DockerSandbox(config)
         self.git = GitPublisher(store, config)
 
     def specs(self, agent: str) -> dict:
-        return {name: SPECS[name] for name in sorted(CAPABILITIES[agent])}
+        return {name: SPECS[name] for name in sorted(self.capabilities[agent])}
 
     def validate(self, agent: str, name: str, args: dict) -> None:
-        if name not in CAPABILITIES[agent]:
+        if name not in self.capabilities[agent]:
             raise PermissionError(f"{agent} is not authorized for {name}")
         if not isinstance(args, dict):
             raise ValueError("Tool args must be an object")
@@ -71,7 +72,7 @@ class Tools:
     def _file(self, root: Path, relative: str, writing: bool = False) -> Path:
         path = safe_path(root, relative)
         if path.suffix.lower() not in TEXT_EXTENSIONS:
-            raise ValueError("Only text documents, source code and internal structured text are allowed")
+            raise ValueError('Allowed output extensions: ' + ', '.join(sorted(TEXT_EXTENSIONS)))
         if writing and relative.replace("\\", "/").split("/")[0] == "inputs":
             raise PermissionError("Authorized input snapshots are read-only to file tools")
         return path
@@ -137,7 +138,7 @@ class Tools:
                 if not isinstance(content, str) or len(content.encode()) > self.config.max_file_bytes:
                     raise ValueError("Content must be UTF-8 text within file limit")
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content, encoding="utf-8")
+                path.write_bytes(content.encode('utf-8'))
                 return {"path": args["path"], "bytes": path.stat().st_size, "sha256": digest(path.read_bytes())}
             if name == "delete_file":
                 if not prepared or prepared["path"] != args["path"] or digest(path.read_bytes()) != prepared["sha256"]:

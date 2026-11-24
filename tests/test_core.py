@@ -368,7 +368,20 @@ class ProviderAndEvaluationTests(TestBase):
         self.assertEqual(request.full_url, "https://api.deepseek.com/chat/completions")
         body = json.loads(request.data)
         self.assertEqual(body["model"], "course-model")
+        context = json.loads(body['messages'][1]['content'])['context']
+        self.assertEqual(context['response_token_limit'], body['max_tokens'])
         self.assertNotIn("test-secret", request.data.decode())
+
+    def test_truncated_response_is_not_accepted_as_an_action(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps({'choices': [{'finish_reason': 'length',
+            'message': {'content': '{"type":"finish","artifacts":["partial.html"]}'}}]}).encode()
+        opener = MagicMock(); opener.open.return_value = response
+        with patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'test-secret'}), patch(
+                'evotask.providers.urllib.request.build_opener', return_value=opener):
+            with self.assertRaisesRegex(ValueError, 'no action executed'):
+                APIProvider(Config(model='course-model')).complete('act', {})
 
     def test_api_errors_do_not_expose_secret_response_body(self):
         opener = MagicMock()

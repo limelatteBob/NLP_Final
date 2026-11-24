@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import copy
+import hashlib
 import re
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
@@ -12,7 +15,9 @@ from .providers import ProviderUnavailable
 from .retrieval import recall
 from .storage import AGENTS, Store, atomic_json, digest, safe_path, uid
 from .tools import CAPABILITIES, Tools
-from .outputs import validate_outputs
+from .teams import Teams
+from .interaction import INTERACTION_POLICY, chinese_prose, clarification, validate_deliverable, validate_plan_language
+
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -21,6 +26,10 @@ CITATION = re.compile(r"\[(doc_[a-f0-9]{12}:[a-f0-9]{8}:\d+)\]")
 
 class RunCancelled(Exception):
     """Cooperative cancellation at model/tool boundaries."""
+
+
+class RevisionTargetRequired(ValueError):
+    """The verifier must identify the responsible author among multiple dependencies."""
 
 
 def validate_checks(checks: object) -> list[dict]:
@@ -45,7 +54,8 @@ def validate_checks(checks: object) -> list[dict]:
     return checks
 
 
-def task_from_spec(spec: dict, task_id: str | None = None, parent: str | None = None, depth: int = 0) -> dict:
+def task_from_spec(spec: dict, task_id: str | None = None, parent: str | None = None, depth: int = 0,
+                   capabilities: dict | None = None) -> dict:
     if not isinstance(spec, dict):
         raise ValueError("Task must be an object")
     identifier = task_id or spec.get("id", "")
@@ -62,7 +72,7 @@ def task_from_spec(spec: dict, task_id: str | None = None, parent: str | None = 
     checks = validate_checks(spec.get("checks"))
     if any(check["kind"] == "python" for check in checks) and "python_run" not in required:
         required.append("python_run")
-    if not any(set(required) <= tools for tools in CAPABILITIES.values()):
+    if not any(set(required) <= tools for tools in (capabilities or CAPABILITIES).values()):
         raise ValueError("No single role has the required tools; split the task")
     dependencies = spec.get("depends_on", [])
     if not isinstance(dependencies, list) or any(not isinstance(x, str) for x in dependencies):
@@ -75,10 +85,10 @@ def task_from_spec(spec: dict, task_id: str | None = None, parent: str | None = 
             "outputs": validate_outputs(spec.get("outputs"))}
 
 
-def validate_plan(specs: object, limit: int) -> list[dict]:
+def validate_plan(specs: object, limit: int, capabilities: dict | None = None) -> list[dict]:
     if not isinstance(specs, list) or not 1 <= len(specs) <= limit:
         raise ValueError("Plan must contain a bounded, nonempty task list")
-    tasks = [task_from_spec(spec) for spec in specs]
+    tasks = [task_from_spec(spec, capabilities=capabilities) for spec in specs]
     ids = {task["id"] for task in tasks}
     if len(ids) != len(tasks):
         raise ValueError("Duplicate task IDs")
@@ -106,7 +116,61 @@ class Engine:
         if self.cancelled():
             raise RunCancelled("Stopped by the user")
 
+    def bind_run(self, run: dict) -> None:
+        self.store.bind_team(run.get('team_id'))
+        team = run.get('team_snapshot')
+        self.tools.capabilities = ({a: set(team['roles'][a]['tools']) for a in AGENTS}
+                                   if team else CAPABILITIES)
+
+    def role_spec(self, run: dict, spec: dict) -> dict:
+        if not isinstance(spec, dict):
+            raise ValueError('Task must be an object')
+        role = spec.get('role')
+        if isinstance(role, str) and role in AGENTS:
+            return spec
+        normalize = lambda value: re.sub(r'[\s_-]+', '', value.casefold())
+        candidates = {a for a in AGENTS if isinstance(role, str) and normalize(role) == normalize(a)}
+        if run.get('team_snapshot') and isinstance(role, str):
+            candidates.update(a for a, profile in run['team_snapshot']['roles'].items()
+                              if normalize(role) == normalize(profile['name']))
+        if len(candidates) != 1:
+            raise ValueError(f'Unknown or ambiguous role {str(role)[:80]!r}; use internal role IDs: {", ".join(AGENTS)}')
+        slot = candidates.pop()
+        self.emit(run, 'coordinator', 'role_normalized', {'original_role': role, 'role': slot})
+        return dict(spec, role=slot)
+
+    def plan_tasks(self, run: dict, planning_memory: list, started: float) -> list[dict] | None:
+        context = {'goal': run['goal'], 'clarifications': run['clarifications'], 'inputs': run['initial_inputs'],
+                   'memory': planning_memory,
+                   'knowledge_bases': [b for b in self.tools.kb.bases() if run.get('knowledge_base_ids') is None
+                                       or b['id'] in run['knowledge_base_ids']],
+                   'capabilities': {a: self.tools.specs(a) for a in AGENTS}}
+        for attempt in range(3):
+            if run['active_seconds'] + time.monotonic() - started >= self.config.active_timeout:
+                raise RuntimeError('Run active-time budget exhausted')
+            plan = self.model(run, 'plan', context)
+            self.emit(run, 'coordinator', 'plan_received', {'attempt': attempt + 1, 'plan': plan})
+            try:
+                if plan.get('question'):
+                    question, options = clarification(plan, chinese=self.config.provider != 'demo')
+                    self.wait(run, None, 'planning', question, options=options)
+                    return None
+                if self.config.provider != 'demo':
+                    validate_plan_language(plan)
+                specs = plan.get('tasks')
+                if isinstance(specs, list):
+                    specs = [self.role_spec(run, spec) for spec in specs]
+                return validate_plan(specs, self.config.max_tasks, self.tools.capabilities)
+            except (ValueError, TypeError) as exc:
+                self.emit(run, 'coordinator', 'plan_rejected', {'reason': str(exc), 'attempt': attempt + 1})
+                if attempt == 2:
+                    raise
+                context.update(previous_plan=plan, validation_error=str(exc),
+                               correction='Correct the validation error and follow the Chinese interaction policy. No tasks or tools have executed. Use the four internal role IDs.')
+        raise RuntimeError('Plan validation failed')
+
     def cancel(self, run: dict) -> dict:
+        self.bind_run(run)
         if run["status"] in TERMINAL:
             return run
         for task in run["tasks"]:
@@ -130,18 +194,41 @@ class Engine:
 
     def new(self, goal: str, inputs: list[Path] | None = None, memory: bool = True, require_review: bool = False,
             *, input_names: list[str] | None = None, knowledge_base_ids: list[str] | None = None,
+<<<<<<< HEAD
             persist: bool = True, run_id: str | None = None) -> dict:
         if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 12000:
             raise ValueError("Goal must contain 1–12000 characters")
         self.tools.kb.validate_bases(knowledge_base_ids)
         run = {"id": run_id or uid("run"), "goal": goal, "status": "planning", "created": time.time(), "ended": None,
+=======
+            team_id: str | None = None, source_run_id: str | None = None, artifact_ids: list[str] | None = None,
+            team_snapshot: dict | None = None, pinned_inputs: list | None = None) -> dict:
+        if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 12000:
+            raise ValueError("Goal must contain 1–12000 characters")
+        self.tools.kb.validate_bases(knowledge_base_ids)
+        teams = Teams(self.store)
+        team = copy.deepcopy(team_snapshot) if team_snapshot else teams.get(team_id) if team_id else None
+        if team and team['id'] != team_id:
+            raise ValueError('Team snapshot does not match the selected team')
+        self.store.bind_team(team_id)
+        history = teams.history(team_id) if team_id else None
+        inherited = pinned_inputs if pinned_inputs is not None else teams.inputs(team_id, source_run_id, artifact_ids or [])
+        run = {"id": uid("run"), "goal": goal, "status": "planning", "created": time.time(), "ended": None,
+>>>>>>> b8fb6de (增加自定义agent功能)
                "config": self.config.snapshot(), "config_hash": self.config.fingerprint(),
                "mode": "demo" if self.config.provider == "demo" else "live", "tasks": [], "artifacts": [],
                "pending": None, "inflight": None, "steps": 0, "model_calls": 0, "active_seconds": 0.0,
                "human_wait_seconds": 0.0, "clarifications": [], "memory_enabled": memory,
                "initial_memory_hashes": {a: digest(json.dumps(self.store.memory(a), sort_keys=True).encode()) for a in AGENTS},
                "initial_inputs": [], "failure": None, "finish_recorded": False, "require_review": require_review,
+<<<<<<< HEAD
                "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2}
+=======
+               "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [],
+               'team_id': team_id, 'team_snapshot': team, 'group_history': history,
+               'inherited_inputs': [], 'input_manifest': []}
+        self.bind_run(run)
+>>>>>>> b8fb6de (增加自定义agent功能)
         for index, source in enumerate(inputs or []):
             if source.suffix.lower() not in {".md", ".txt"} or not source.is_file():
                 raise ValueError("Task inputs must be existing .md/.txt files")
@@ -154,14 +241,65 @@ class Engine:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
             run["initial_inputs"].append(relative)
+<<<<<<< HEAD
             run.setdefault("input_manifest", []).append({"path": relative, "name": name})
         if persist:
             self.store.message("group", "human", goal)
             self.store.save(run)
             self.emit(run, "coordinator", "run_created", {"mode": run["mode"], "config_hash": run["config_hash"]})
+=======
+            with source.open('rb') as stream:
+                run['input_manifest'].append({'input_path': relative, 'sha256': hashlib.file_digest(stream, 'sha256').hexdigest()})
+        for metadata, content in inherited:
+            relative = metadata['input_path']
+            if (not relative.startswith('inputs/') or relative in run['initial_inputs']
+                    or digest(content) != metadata['sha256']
+                    or (metadata.get('source_run_id') and len(content) > self.config.max_file_bytes)):
+                raise ValueError('Invalid, duplicate or oversized inherited snapshot')
+            content.decode('utf-8')
+            for agent in AGENTS:
+                target = safe_path(self.store.workspace(agent, run['id']), relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            run['initial_inputs'].append(relative)
+            run['input_manifest'].append(copy.deepcopy(metadata))
+            if metadata.get('source_run_id'):
+                run['inherited_inputs'].append(copy.deepcopy(metadata))
+        self.store.message("group", "human", goal)
+        self.store.save(run)
+        self.emit(run, "coordinator", "run_created", {"mode": run["mode"], "config_hash": run["config_hash"]})
+>>>>>>> b8fb6de (增加自定义agent功能)
+        return run
+
+    def rerun(self, previous: dict) -> dict:
+        if previous['status'] not in {'failed', 'cancelled'}:
+            raise ValueError('Only failed or cancelled runs may be restarted')
+        snapshots = []
+        for relative in previous['initial_inputs']:
+            content = safe_path(self.store.workspace('coordinator', previous['id']), relative).read_bytes()
+            metadata = next((m for m in previous.get('input_manifest', []) if m['input_path'] == relative),
+                            {'input_path': relative, 'sha256': digest(content)})
+            if digest(content) != metadata['sha256']:
+                raise ValueError('Original input snapshot has changed')
+            snapshots.append((metadata, content))
+        run = self.new(previous['goal'], memory=previous['memory_enabled'], require_review=previous.get('require_review', False),
+                       knowledge_base_ids=previous.get('knowledge_base_ids'), team_id=previous.get('team_id'),
+                       team_snapshot=previous.get('team_snapshot'), pinned_inputs=snapshots)
+        run.update(rerun_of=previous['id'], uploaded_files=copy.deepcopy(previous.get('uploaded_files', [])))
+        self.store.save(run)
         return run
 
     def model(self, run: dict, purpose: str, context: dict) -> dict:
+        self.bind_run(run)
+        context = dict(context, current_time_utc=datetime.now(timezone.utc).isoformat(),
+                       interaction_policy=INTERACTION_POLICY, clarifications=run['clarifications'])
+        if run.get('team_snapshot'):
+            context = dict(context, team=run['team_snapshot'],
+                           role_profile=run['team_snapshot']['roles'][context.get('agent', 'coordinator')],
+                           recent_group_messages=[{'sender': m['sender'], 'body': m['body'][:1200]}
+                                                  for m in self.store.messages('group', limit=8)])
+        if purpose == 'plan':
+            context = dict(context, group_history=run.get('group_history'), inherited_inputs=run.get('inherited_inputs', []))
         self.check_cancelled()
         if run["model_calls"] >= self.config.max_model_calls:
             raise RuntimeError("Model call budget exhausted")
@@ -246,22 +384,18 @@ class Engine:
         if run['steps'] >= self.config.max_steps or run['model_calls'] >= self.config.max_model_calls or run['active_seconds'] >= self.config.active_timeout:
             raise ValueError('Run budget exhausted; start a new task with the saved evidence')
         candidates = [t for t in run['tasks'] if t['id'] in verifier['depends_on'] and t['status'] == 'succeeded' and t['role'] != 'verifier']
+        if not target_id and len(candidates) > 1 and reason.strip():
+            self.freeze_verification(run, verifier)
+            raise RevisionTargetRequired('Choose the responsible author with request_revision(target_task, reason). '
+                                         'Candidate task IDs: ' + ', '.join(t['id'] for t in candidates) +
+                                         '. The failing verification scripts are frozen; do not edit their assertions.')
         target = next((t for t in candidates if t['id'] == target_id), None) if target_id else (candidates[0] if len(candidates) == 1 else None)
         if not target or not reason.strip():
             raise ValueError('Revision needs a specific successful direct dependency and an observed failure')
         affected = descendants(run['tasks'], target['id']) | {target['id']}
         if any(t['children'] for t in run['tasks'] if t['id'] in affected):
             raise ValueError('This revision spans delegated children; start a new task with archived outputs')
-        # Pin executable checks so the verifier cannot make a failed assertion disappear.
-        paths = {c['path'] for c in verifier['checks'] if c['kind'] == 'python'}
-        paths.update(h.get('action', {}).get('args', {}).get('path') for h in verifier['history']
-                     if h.get('action', {}).get('name') == 'python_run')
-        frozen = verifier.setdefault('revision_tests', [])
-        for path in sorted(p for p in paths if isinstance(p, str)):
-            source = self.tools._file(self.store.workspace(verifier['owner'], run['id']), path)
-            if source.is_file() and not any(f['path'] == path for f in frozen):
-                artifact = self.store.archive(run, verifier['owner'], path, verifier['id'])
-                frozen.append({'path': path, 'artifact_id': artifact['id'], 'sha256': artifact['sha256']})
+        frozen = self.freeze_verification(run, verifier)
         number = run.get('revision_count', 0) + 1
         feedback = {'round': number, 'from_task': verifier['id'], 'target_task': target['id'], 'reason': reason[:4000],
                     'verifier_objective': verifier['objective'], 'checks': verifier['checks'], 'frozen_tests': frozen[:], 'created': time.time()}
@@ -280,14 +414,27 @@ class Engine:
                 for entry in memories:
                     if entry.get('run_id') == run['id'] and entry.get('kind') == 'success' and task['id'] in entry.get('id', '').split(':'):
                         entry.update(verified=False, superseded=True)
-                atomic_json(self.store.root / 'agents' / task['owner'] / 'memory.json', memories)
+                atomic_json(self.store.memory_path(task['owner']), memories)
         run.update(status='running', pending=None, failure=None, ended=None, finish_recorded=False)
         self.emit(run, verifier['owner'], 'revision_requested', feedback)
         self.store.message('group', verifier['owner'], f"第 {number} 轮返修：退回 {target['id']}。{reason[:500]}；保留原验收要求并重新验证。")
         self.store.save(run)
         return feedback
 
+    def freeze_verification(self, run: dict, verifier: dict) -> list[dict]:
+        paths = {c['path'] for c in verifier['checks'] if c['kind'] == 'python'}
+        paths.update(h.get('action', {}).get('args', {}).get('path') for h in verifier['history']
+                     if h.get('action', {}).get('name') == 'python_run')
+        frozen = verifier.setdefault('revision_tests', [])
+        for path in sorted(p for p in paths if isinstance(p, str)):
+            source = self.tools._file(self.store.workspace(verifier['owner'], run['id']), path)
+            if source.is_file() and not any(f['path'] == path for f in frozen):
+                artifact = self.store.archive(run, verifier['owner'], path, verifier['id'])
+                frozen.append({'path': path, 'artifact_id': artifact['id'], 'sha256': artifact['sha256']})
+        return frozen
+
     def retry_verification(self, run: dict) -> dict:
+        self.bind_run(run)
         if run['status'] != 'failed':
             raise ValueError('Only a failed run can be reopened for revision')
         verifier = next((t for t in run['tasks'] if t['role'] == 'verifier' and t['status'] == 'failed'
@@ -295,10 +442,22 @@ class Engine:
         if not verifier:
             raise ValueError('No failed verifier with recorded evidence is available')
         reason = next(h['result']['observed_error'] for h in reversed(verifier['history']) if h.get('result', {}).get('observed_error'))
-        return self.request_revision(run, verifier, reason)
+        try:
+            return self.request_revision(run, verifier, reason)
+        except RevisionTargetRequired as exc:
+            if verifier['steps'] >= self.config.max_task_steps or run.get('revision_selection_retries', 0) >= 2:
+                raise ValueError('Revision selection budget exhausted') from exc
+            run['revision_selection_retries'] = run.get('revision_selection_retries', 0) + 1
+            verifier.update(status='running', error_streak=0, summary='')
+            verifier['history'].append({'event': 'revision_target_required', 'guidance': str(exc)})
+            run.update(status='running', pending=None, failure=None, ended=None, finish_recorded=False)
+            self.emit(run, verifier['owner'], 'revision_target_required', {'task_id': verifier['id'], 'reason': str(exc)})
+            self.store.save(run)
+            return {'selection_required': True}
 
     def retryable_action_tasks(self, run: dict) -> list[dict]:
         """Only reopen format failures that this controller can now interpret safely."""
+        self.bind_run(run)
         if (run['status'] != 'failed' or run['pending'] or run['inflight'] or run.get('failure')
                 or run.get('action_retry_count', 0) >= 2
                 or run['steps'] >= self.config.max_steps
@@ -349,20 +508,27 @@ class Engine:
         self.store.save(run)
 
     def wait(self, run: dict, task: dict | None, kind: str, question: str, action: dict | None = None,
-             prepared: dict | None = None) -> None:
+             prepared: dict | None = None, options: list[str] | None = None) -> None:
+        if kind in {'planning', 'clarification'} and any(
+                item['question'].strip() == question.strip() for item in run['clarifications']):
+            raise ValueError('这个问题已得到回答，请读取 clarifications 并继续；仅对新的阻塞信息提问。')
         pending = {"id": uid("request"), "task_id": task["id"] if task else None, "kind": kind,
-                   "question": question, "action": action, "prepared": prepared, "created": time.time()}
+                   "question": question, "options": options or [], "action": action, "prepared": prepared, "created": time.time()}
         run["pending"], run["status"] = pending, "waiting_human"
         if task:
             task["status"] = "waiting_human"
         self.store.save(run)
         self.emit(run, task["owner"] if task else "coordinator", "waiting_human",
-                  {key: pending[key] for key in ("id", "kind", "question", "task_id")})
+                  {key: pending[key] for key in ("id", "kind", "question", "options", "task_id")})
+        if run.get('team_id'):
+            prompt = question + ('\n' + ' / '.join(options) if options else '')
+            self.store.message('group', task['owner'] if task else 'coordinator', prompt)
 
     def assign(self, run: dict, task: dict) -> None:
-        candidates = [agent for agent in AGENTS if set(task["required_tools"]) <= CAPABILITIES[agent]]
+        candidates = [agent for agent in AGENTS if set(task["required_tools"]) <= self.tools.capabilities[agent]]
         if task["role"] == "verifier":
-            upstream_owners = {t["owner"] for t in run["tasks"] if t["id"] in task["depends_on"]}
+            upstream = ancestors(run['tasks'], task['id'])
+            upstream_owners = {t["owner"] for t in run["tasks"] if t["id"] in upstream}
             candidates = [agent for agent in candidates if agent not in upstream_owners]
         # A different agent must perform delegated work; same-owner re-entry is not collaboration.
         if task["parent"]:
@@ -373,6 +539,8 @@ class Engine:
             bid = self.model(run, "bid", {"agent": agent, "task": task, "tools": self.tools.specs(agent)})
             if type(bid.get("accept")) is not bool or not isinstance(bid.get("reason"), str):
                 raise ValueError("Malformed capability bid")
+            if self.config.provider != 'demo':
+                chinese_prose(bid['reason'], '分工理由')
             confidence = bid.get("confidence", 0)
             if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
                 raise ValueError("Bid confidence must be between 0 and 1")
@@ -384,6 +552,9 @@ class Engine:
         task["owner"] = max(accepted, key=lambda bid: (bid["confidence"], bid["agent"] == task["role"]))["agent"]
         task["status"] = "running"
         task["inputs"] = list(run["initial_inputs"])
+        for item in run.get('inherited_inputs', []):
+            task['allowed_citations'].extend(item.get('citations', []))
+            task.setdefault('source_evidence', []).extend(item.get('source_evidence', []))
         self.refresh_inputs(run, task)
         if run["memory_enabled"]:
             task["memory_hits"] = recall(self.store, task["owner"], task["objective"])
@@ -408,7 +579,7 @@ class Engine:
     def delegate(self, run: dict, task: dict, action: dict) -> dict:
         if len(run["tasks"]) >= self.config.max_tasks or task["depth"] >= self.config.max_delegate_depth:
             raise ValueError("Delegation task/depth budget exceeded")
-        child = task_from_spec(action, uid("sub"), task["id"], task["depth"] + 1)
+        child = task_from_spec(self.role_spec(run, action), uid("sub"), task["id"], task["depth"] + 1, self.tools.capabilities)
         child["depends_on"] = []
         paths = action.get("inputs", [])
         if not isinstance(paths, list) or len(paths) > 10:
@@ -445,10 +616,18 @@ class Engine:
             raise ValueError("Duplicate artifact path")
         root = self.store.workspace(task["owner"], run["id"])
         for path in paths:
+<<<<<<< HEAD
             self.tools._file(root, path, writing=True)
         required_outputs = {o['path'] for o in task.get('outputs', []) if o['kind'] == 'deliverable'}
         if not required_outputs <= set(paths):
             raise ValueError('finish must export every declared deliverable: ' + ', '.join(sorted(required_outputs - set(paths))))
+=======
+            target = self.tools._file(root, path, writing=True)
+            if self.config.provider != 'demo' and not frozen:
+                if target.stat().st_size > self.config.max_file_bytes:
+                    raise ValueError('交付文件超过配置的大小限制。')
+                validate_deliverable(target)
+>>>>>>> b8fb6de (增加自定义agent功能)
         if frozen:
             artifacts = []
             for approved_artifact in frozen:
@@ -467,8 +646,9 @@ class Engine:
                 kind = check["kind"]
                 if kind == "human":
                     if not approved:
-                        reasons = "\n".join(c["reason"] for c in task["checks"] if c["kind"] == "human")
-                        self.wait(run, task, "acceptance", reasons, action, {"artifacts": artifacts})
+                        reasons = [c["reason"] for c in task["checks"] if c["kind"] == "human"]
+                        self.wait(run, task, "acceptance", "是否接受本次交付？可先查看文件及验收要求。", action,
+                                  {"artifacts": artifacts, "review_checks": reasons})
                         return
                     outcomes.append({"kind": "human", "passed": True})
                     continue
@@ -535,14 +715,16 @@ class Engine:
     def action(self, run: dict, task: dict, action: dict, approved: bool = False, prepared: dict | None = None) -> None:
         action = self.normalize_decision(run, task, action)
         kind = action["type"]
+        if self.config.provider != 'demo' and not approved:
+            for field in {'finish': ('summary',), 'delegate': ('title', 'objective'),
+                          'fail': ('reason',), 'request_revision': ('reason',)}.get(kind, ()):
+                chinese_prose(action.get(field, ''), field)
         if kind == 'request_revision':
             self.request_revision(run, task, str(action.get('reason', '')), action.get('target_task'))
             return
         if kind == "ask":
-            question = action.get("question")
-            if not isinstance(question, str) or not question.strip():
-                raise ValueError("Clarification requires a question")
-            self.wait(run, task, "clarification", question[:4000], action)
+            question, options = clarification(action, chinese=self.config.provider != 'demo')
+            self.wait(run, task, "clarification", question, action, options=options)
             return
         if kind == "finish":
             self.finish(run, task, action, approved, prepared.get("artifacts") if prepared else None)
@@ -556,7 +738,8 @@ class Engine:
             if not approved:
                 prepared = self.tools.prepare(run, task, name, args)
                 if prepared:
-                    self.wait(run, task, "tool_approval", f"批准 {name}？具体版本和目标见 prepared。", action, prepared)
+                    label = '发布代码到 GitHub' if name == 'git_publish' else '删除文件'
+                    self.wait(run, task, "tool_approval", f"是否允许{label}？请先核对下方的文件与目标。", action, prepared)
                     return
             run["inflight"] = {"task_id": task["id"], "action": action, "started": time.time()}
             self.store.save(run)  # Never silently replay a potentially side-effecting operation after a crash.
@@ -598,6 +781,7 @@ class Engine:
                     task["status"] = "running"
 
     def advance(self, run: dict) -> dict:
+        self.bind_run(run)
         if Config(**run["config"]) != self.config:
             raise ValueError("Configuration changed; resume with the original configuration")
         if run["status"] in TERMINAL or run["pending"]:
@@ -614,15 +798,11 @@ class Engine:
                     "Previous tool execution interrupted; outcome uncertain. Not replayed; inspect archived outputs and remote side effects."), terminal=True)
             if run["status"] == "planning":
                 planning_memory = recall(self.store, "coordinator", run["goal"]) if run["memory_enabled"] else []
-                plan = self.model(run, "plan", {"goal": run["goal"], "clarifications": run["clarifications"],
-                    "inputs": run["initial_inputs"], "memory": planning_memory,
-                    'knowledge_bases': [b for b in self.tools.kb.bases() if run.get('knowledge_base_ids') is None or b['id'] in run['knowledge_base_ids']],
-                    "capabilities": {a: self.tools.specs(a) for a in AGENTS}})
                 self.emit(run, "coordinator", "memory_recalled", {"ids": [m["id"] for m in planning_memory]})
-                if plan.get("question"):
-                    self.wait(run, None, "planning", str(plan["question"])[:4000])
+                tasks = self.plan_tasks(run, planning_memory, start)
+                if tasks is None:
                     return run
-                run["tasks"] = validate_plan(plan.get("tasks"), self.config.max_tasks)
+                run['tasks'] = tasks
                 if run.get("require_review"):
                     # Plans need not be topologically ordered. Review every final
                     # deliverable task, not simply the last item in the model's list.
@@ -685,6 +865,9 @@ class Engine:
                             and (action.get('name') == 'python_run' or action.get('type') == 'finish')):
                         try:
                             self.request_revision(run, task, str(exc))
+                        except RevisionTargetRequired as revision_error:
+                            task['history'].append({'event': 'revision_target_required', 'guidance': str(revision_error)})
+                            self.emit(run, task['owner'], 'revision_target_required', {'task_id': task['id'], 'reason': str(revision_error)})
                         except ValueError as revision_error:
                             task['status'] = 'failed'
                             task['summary'] = f'{exc}\nRevision unavailable: {revision_error}'[:4000]
@@ -707,6 +890,7 @@ class Engine:
 
     def resume(self, run_id: str, request_id: str, reply: str) -> dict:
         run = self.store.load(run_id)
+        self.bind_run(run)
         if Config(**run["config"]) != self.config:
             raise ValueError("Resume requires the original configuration")
         pending = run["pending"]
@@ -724,6 +908,8 @@ class Engine:
         if task:
             task["status"] = "running"
         self.emit(run, "human", "human_reply", {"request_id": request_id, "kind": pending["kind"], "reply": reply})
+        if run.get('team_id'):
+            self.store.message('group', 'human', reply)
         self.store.save(run)
         started = time.monotonic()
         if approval:
@@ -737,6 +923,7 @@ class Engine:
                     self.fail_attempt(run, task, pending["action"], exc)
         elif task:
             task["history"].append({"action": pending["action"], "result": {"human_reply": reply}})
+            run['clarifications'].append({'question': pending['question'], 'answer': reply, 'task_id': task['id']})
         else:
             run["clarifications"].append({"question": pending["question"], "answer": reply})
         run["active_seconds"] += time.monotonic() - started
@@ -764,7 +951,8 @@ class Engine:
                         "evidence": errors[-1]})
         self.emit(run, "coordinator", "run_finished", {"status": run["status"], "mode": run["mode"], "metrics": self.metrics(run)})
 
-    def metrics(self, run: dict) -> dict:
+    @staticmethod
+    def metrics(run: dict) -> dict:
         total = len(run["tasks"])
         success = sum(t["status"] == "succeeded" for t in run["tasks"])
         end = run["ended"] or time.time()

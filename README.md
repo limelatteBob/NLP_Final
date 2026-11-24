@@ -9,6 +9,8 @@ EvoTask 是一个 NLP 课程项目，由 Coordinator、Researcher、Coder 和 Ve
 - **账号同步**：在同一服务内跨浏览器、跨设备使用知识库、任务和对话。
 - **过程可追溯**：查看协作事件、人工审批、失败原因、产物版本及 Agent 经验，预览并下载结果。
 
+新增自定义团队：在「Agent 对话」填写四位成员的名称和职责，在群内发起任务、回答问题、选择上一轮交付继续开发。支持 HTML 下载、完整团队记录及评测包 ZIP 导出；见 [操作与中期测试](docs/mid-test.md)。
+
 ## 新用户上手（Windows）
 
 Clone 或下载仓库后，在**项目根目录打开 PowerShell**。以下步骤用于运行真实模型任务，首次安装需要联网。
@@ -62,6 +64,8 @@ macOS/Linux 启动方法见 [Web 手册](docs/webapp.md#启动与体验)。模�
 
 Web 数据保存在 `.evotask-web/`；备份与恢复见 [账号手册](docs/accounts.md#存储与认证)。
 
+团队页支持群聊及 Agent 私聊。真实模型统一用中文回复和撰写交付正文；每次只问一个关键问题，可点选简短答案或自行填写。删除和发布操作仍需明确确认。
+
 Push 到 GitHub 后，新用户可按上述步骤本地运行。若希望用户直接打开网址使用，需要部署 Python 后端、持久化数据目录并配置访问控制与 HTTPS；代码执行所需的 Docker 由服务器提供，访问网站的用户无需本地安装。部署方法见 [局域网访问](docs/accounts.md#让其他设备连接) 和 [Web 部署](docs/webapp.md#对外体验与部署)，当前使用单个 Uvicorn worker。
 
 ## 开发与验证
@@ -84,6 +88,8 @@ Push 到 GitHub 后，新用户可按上述步骤本地运行。若希望用户�
 | Agent 协作、验证返修与个人知识库 | [协作流程](docs/collaboration.md) |
 | CLI、模型配置、Docker、GitHub 发布与评测 | [进阶手册](docs/cli.md) |
 | 状态机、权限、RAG 与存储设计 | [架构说明](docs/architecture.md) |
+| 中文交互、课程架构要求与实测边界 | [架构核查](docs/ARCHITECTURE_CHECK.md) |
 | 已实现范围、测试记录与限制 | [实现记录](docs/implementation.md) |
+| 自定义团队、跨轮交付与中期实测 | [操作说明](docs/mid-test.md) · [测试报告](docs/MID_TEST_RESULTS.md) |
 
-当前 Agent 工作流采用固定角色和串行调度，暂不支持角色热切换或 Electron 安装包。上传不设固定格式或大小限制，但实际容量与可解析格式有边界；尚未支持 OCR，无法提取正文的文件只保存原件。
+当前 Agent 工作流使用四个固定内部位置和串行调度，可自定义成员名称与职责，暂不支持任务中角色热切换或 Electron 安装包。上传不设固定格式或大小限制，但实际容量与可解析格式有边界；尚未支持 OCR，无法提取正文的文件只保存原件。

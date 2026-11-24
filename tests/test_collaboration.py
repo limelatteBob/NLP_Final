@@ -75,6 +75,24 @@ class InspectingSandbox:
                 'output': 'passed' if success else 'AssertionError: No URLs found in report', 'sandbox': 'test-fixture'}
 
 
+class MultiDependencyProvider(ReportProvider):
+    def complete(self, purpose, context):
+        if purpose == 'plan':
+            plan = super().complete(purpose, context)
+            plan['tasks'].insert(2, {'id': 'docs', 'title': 'guide', 'objective': 'document usage',
+                'role': 'researcher', 'depends_on': ['write'], 'checks': [{'kind': 'exists', 'path': 'guide.md'}]})
+            plan['tasks'][-1]['depends_on'] = ['write', 'docs']
+            return plan
+        if purpose == 'act':
+            task = context['task']
+            if task['id'] == 'docs':
+                return ({'type': 'tool', 'name': 'write_file', 'args': {'path': 'guide.md', 'content': 'Read report.md'}}
+                        if task['steps'] == 1 else {'type': 'finish', 'summary': 'guide ready', 'artifacts': ['guide.md']})
+            if task['id'] == 'verify' and task['steps'] >= 3 and not task.get('revision_feedback'):
+                return {'type': 'request_revision', 'target_task': 'write', 'reason': 'The report omits its source URL'}
+        return super().complete(purpose, context)
+
+
 class CollaborationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='evotask-collaboration-')
@@ -184,6 +202,29 @@ class CollaborationTests(unittest.TestCase):
             normalize_action(ambiguous)
         with self.assertRaises(ValueError):
             normalize_action({'purpose': 'plan', 'action': action})
+
+    def test_verifier_selects_author_when_multiple_dependencies_exist(self):
+        sandbox = InspectingSandbox()
+        engine = Engine(self.store, self.config, MultiDependencyProvider(), sandbox=sandbox)
+        run = engine.advance(engine.new('multi dependency report'))
+        self.assertEqual(run['status'], 'succeeded', run['failure'])
+        self.assertEqual(run['revisions'][0]['target_task'], 'write')
+        self.assertEqual(len(set(sandbox.script_hashes)), 1)
+        self.assertTrue(any(e['kind'] == 'revision_target_required' for e in self.store.events(run['id'])))
+
+    def test_legacy_ambiguous_revision_can_resume_with_tests_frozen(self):
+        from unittest.mock import patch
+        engine = Engine(self.store, self.config, MultiDependencyProvider(), sandbox=InspectingSandbox())
+        with patch.object(engine, 'request_revision', side_effect=ValueError('Revision needs a specific successful direct dependency')):
+            run = engine.advance(engine.new('legacy multi dependency report'))
+        self.assertEqual(run['status'], 'failed')
+        engine.retry_verification(run)
+        verifier = run['tasks'][-1]
+        self.assertTrue(verifier['revision_tests'])
+        with self.assertRaises(PermissionError):
+            engine.tools.execute(run, verifier, 'write_file', {'path': 'verify_report.py', 'content': 'print("pass")'})
+        engine.advance(run)
+        self.assertEqual(run['status'], 'succeeded', run['failure'])
 
     @unittest.skipUnless(os.environ.get('EVOTASK_DOCKER_TESTS') == '1', 'Opt-in real Docker revision workflow')
     def test_real_docker_executes_unchanged_verifier_after_author_revision(self):

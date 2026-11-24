@@ -26,7 +26,7 @@ export function graph(run = null) {
   const nodes = ['coordinator', 'researcher', 'coder', 'verifier'].map(id => {
     const working = active.includes(id) || (id === 'coordinator' && run?.status === 'planning');
     const done = run?.tasks.some(t => t.owner === id && t.status === 'succeeded');
-    return `<button class="team-node ${id} ${working ? 'working' : ''}" data-action="memory" data-agent="${id}" aria-label="查看 ${roles[id].name} 经验">${agentIcon(id)}<span><strong>${roles[id].name}</strong><small>${working ? '正在执行任务' : done ? '已完成分工' : roles[id].label}</small></span></button>`;
+    return `<button class="team-node ${id} ${working ? 'working' : ''}" data-action="memory" data-agent="${id}" aria-label="查看 ${esc(run?.team_snapshot?.roles[id]?.name || roles[id].name)} 经验">${agentIcon(id)}<span><strong>${esc(run?.team_snapshot?.roles[id]?.name || roles[id].name)}</strong><small>${working ? '正在执行任务' : done ? '已完成分工' : roles[id].label}</small></span></button>`;
   }).join('');
   return `<div class="team-visual ${run?.executing ? 'executing' : ''}"><div class="team-visual-heading"><span>${icon('activity')}${run ? '协作网络' : '团队概览'}</span><small><i class="dot"></i>${run ? '任务状态' : '4 AGENTS READY'}</small></div><div class="constellation"><svg class="connections" viewBox="0 0 380 202" preserveAspectRatio="none" aria-hidden="true"><ellipse class="orbit" cx="190" cy="102" rx="130" ry="74"/><ellipse class="orbit dashed" cx="190" cy="102" rx="153" ry="93"/><circle class="core-halo" cx="190" cy="101" r="39"/><path class="edge" d="M190 48V80M190 124v35M103 111h62M216 111h62"/><path class="edge" d="M190 48Q77 40 61 99M190 48Q303 40 319 99M61 126Q90 177 190 177M319 126Q285 177 190 177"/></svg><div class="core">${brand()}</div>${nodes}</div><div class="graph-caption"><span><i></i>独立记忆</span><span class="caption-line"></span><span>按能力分工</span><span class="caption-line"></span><span>可追溯交接</span></div></div>`;
 }
@@ -37,6 +37,8 @@ export function runsTable(runs, filtered = false) {
 }
 
 const eventLabels = {
+  role_normalized: '已映射自定义角色名称', plan_received: '收到原始规划', plan_rejected: '反馈规划格式问题',
+  revision_target_required: '验证者正在定位需返修的任务',
   action_normalized: '已适配工具调用格式', action_retry_requested: '继续格式错误处的任务',
   revision_requested: '退回作者修订', artifact_refreshed: '已交接修订版本', revision_unavailable: '返修暂不可用',
   run_created: '任务已创建', model_request: '请求模型决策', plan_created: '已生成任务计划',
@@ -46,19 +48,19 @@ const eventLabels = {
   human_reply: '收到人工回复', run_finished: '本次任务已结束', run_cancelled: '已停止任务',
   service_error: '执行服务中断', tool_started: '开始执行工具',
 };
-export function timeline(events, verbose = false) {
+export function timeline(events, verbose = false, team = null) {
   const meaningful = verbose ? events : events.filter(e => !['model_request', 'capability_bid'].includes(e.kind));
   if (!meaningful.length) return '<div class="artifact-empty">任务开始后，协作过程将在这里实时出现。</div>';
   return `<div class="timeline">${meaningful.slice(-80).reverse().map(event => {
     const data = event.data;
     const detail = data.question || data.title || data.observed_error || data.message || data.reason || data.task_id || (data.status ? labels[data.status] : '') || '';
-    return `<div class="timeline-item ${event.kind.includes('fail') || event.kind.includes('error') ? 'error' : ''}"><details data-event="${event.seq}"><summary><strong>${roles[event.agent]?.name || esc(event.agent)} · ${eventLabels[event.kind] || esc(event.kind)}</strong>${detail ? `<p>${esc(detail)}</p>` : ''}<time>${new Date(event.created * 1000).toLocaleTimeString('zh-CN', { hour12: false })}</time></summary><pre class="event-data">${esc(JSON.stringify(data, null, 2))}</pre></details></div>`;
+    return `<div class="timeline-item ${event.kind.includes('fail') || event.kind.includes('error') ? 'error' : ''}"><details data-event="${event.seq}"><summary><strong>${esc(team?.roles[event.agent]?.name || roles[event.agent]?.name || event.agent)} · ${eventLabels[event.kind] || esc(event.kind)}</strong>${detail ? `<p>${esc(detail)}</p>` : ''}<time>${new Date(event.created * 1000).toLocaleTimeString('zh-CN', { hour12: false })}</time></summary><pre class="event-data">${esc(JSON.stringify(data, null, 2))}</pre></details></div>`;
   }).join('')}</div>`;
 }
 
 export function tasks(run) {
   if (!run.tasks.length) return empty('正在拆解你的目标', '协调 Agent 将分析目标、确定分工并制定验收条件。', 'branch');
-  return `<div class="task-list">${run.tasks.map(task => `<details class="task-item" data-task="${esc(task.id)}"><summary class="task-summary">${agentIcon(task.owner || task.role)}<div class="task-text"><strong>${esc(task.title)}</strong><small>${task.parent ? '↳ 委派任务 · ' : ''}${roles[task.owner]?.name || '等待分配'} · ${task.steps} 步操作</small></div>${badge(task.status)}${icon('chevron')}</summary><div class="task-details"><p>${esc(task.objective)}</p>${task.summary ? `<p>${esc(task.summary)}</p>` : ''}${task.depends_on.length ? `<p class="dependency">前置任务：${esc(task.depends_on.join(', '))}</p>` : ''}<div>验收条件</div>${task.checks.map(check => `<div class="check-line">${icon(task.status === 'succeeded' ? 'check' : 'shield')}<span>${esc(check.kind)} · ${esc(check.reason || check.path)}${check.text ? ` 包含「${esc(check.text)}」` : ''}</span></div>`).join('')}${task.memory_hits.length ? `<p class="dependency">本次召回 ${task.memory_hits.length} 条历史经验</p>` : ''}</div></details>`).join('')}</div>`;
+  return `<div class="task-list">${run.tasks.map(task => `<details class="task-item" data-task="${esc(task.id)}"><summary class="task-summary">${agentIcon(task.owner || task.role)}<div class="task-text"><strong>${esc(task.title)}</strong><small>${task.parent ? '↳ 委派任务 · ' : ''}${esc(run.team_snapshot?.roles[task.owner]?.name || roles[task.owner]?.name || '等待分配')} · ${task.steps} 步操作</small></div>${badge(task.status)}${icon('chevron')}</summary><div class="task-details"><p>${esc(task.objective)}</p>${task.summary ? `<p>${esc(task.summary)}</p>` : ''}${task.depends_on.length ? `<p class="dependency">前置任务：${esc(task.depends_on.join(', '))}</p>` : ''}<div>验收条件</div>${task.checks.map(check => `<div class="check-line">${icon(task.status === 'succeeded' ? 'check' : 'shield')}<span>${esc(check.kind)} · ${esc(check.reason || check.path)}${check.text ? ` 包含「${esc(check.text)}」` : ''}</span></div>`).join('')}${task.memory_hits.length ? `<p class="dependency">本次召回 ${task.memory_hits.length} 条历史经验</p>` : ''}</div></details>`).join('')}</div>`;
 }
 
 export function markdown(source) {
@@ -78,4 +80,9 @@ export function markdown(source) {
   }
   if (code !== null) output += `<pre><code>${esc(code.join('\n'))}</code></pre>`;
   return output;
+}
+
+// Values are submitted only by an explicit click; typing a custom answer stays available.
+export function questionOptions(pending) {
+  return (pending.options || []).length ? `<div class="team-actions question-options">${pending.options.map(option => `<button type="submit" class="btn secondary small" name="reply" value="${esc(option)}" formnovalidate>${esc(option)}</button>`).join('')}</div>` : '';
 }

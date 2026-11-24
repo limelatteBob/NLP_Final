@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.background import BackgroundTask
 
 from ..config import Config
 from ..conversations import team_messages
@@ -36,6 +37,8 @@ from ..retrieval import KnowledgeBase
 from ..sandbox import DockerSandbox
 from ..storage import AGENTS, Store, atomic_json, safe_path, uid
 from ..tools import CAPABILITIES
+from ..teams import Teams
+from ..exports import EvaluationExportError, evaluation_zip, team_audit, zip_chunks
 from .accounts import Accounts, ACCOUNT_COOKIE, SESSION_SECONDS, token_digest, username
 from .knowledge_import import already_imported, copy_knowledge
 
@@ -64,6 +67,14 @@ class RunInput(Payload):
     files: list[TextFile] = Field(default_factory=list)
     upload_ids: list[str] = Field(default_factory=list)
     knowledge_base_ids: list[str] | None = None
+    team_id: str | None = None
+    source_run_id: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list, max_length=60)
+
+
+class TeamInput(Payload):
+    name: str = Field(min_length=1, max_length=80)
+    roles: dict
 
 
 class RetryInput(Payload):
@@ -73,6 +84,7 @@ class RetryInput(Payload):
 class ReplyInput(Payload):
     request_id: str = Field(min_length=1, max_length=80)
     reply: str = Field(min_length=1, max_length=8000)
+    team_id: str | None = None
 
 
 class DocumentInput(TextFile):
@@ -104,6 +116,7 @@ class DocumentSettings(Payload):
 class ChatInput(Payload):
     channel: Channel = "group"
     message: str = Field(min_length=1, max_length=8000)
+    team_id: str | None = None
 
 
 class LoginInput(Payload):
@@ -443,6 +456,8 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
         fields = ("id", "goal", "status", "mode", "created", "updated", "ended", "failure",
                   "memory_enabled", "model_calls", "steps", "active_seconds", "human_wait_seconds")
         result = {k: run[k] for k in fields}
+        result.update(team_id=run.get('team_id'), team_snapshot=run.get('team_snapshot'),
+                      inherited_inputs=run.get('inherited_inputs', []), rerun_of=run.get('rerun_of'))
         result["metrics"] = Engine(store, Config(**run["config"]), None).metrics(run)
         presented = describe_artifacts(run, store.events(run['id']))
         groups = grouped_artifacts(presented)
@@ -592,7 +607,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
         with storage(request, mode) as store:
             runs = [public_run(run, store, False) for run in store.runs()]
             docs = KnowledgeBase(store).summaries()
-            return {"runs": runs, "documents": len(docs), 'knowledge_bases': KnowledgeBase(store).bases(), "job": jobs.info(store.root),
+            return {"runs": runs, "teams": Teams(store).list(), "documents": len(docs), 'knowledge_bases': KnowledgeBase(store).bases(), "job": jobs.info(store.root),
                     "agents": [{"id": a, "tools": sorted(CAPABILITIES[a]),
                                 "memory_count": len(store.memory(a))} for a in AGENTS]}
 
@@ -648,9 +663,10 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                     path.write_bytes(content)
                     paths.append(path)
                     names.append(file.name[:100] + '.txt')
-                goal = DEMO_GOAL if mode == "demo" else body.goal.strip()
+                goal = DEMO_GOAL if mode == "demo" and not body.team_id else body.goal.strip()
                 run = Engine(store, cfg, None).new(goal, paths, body.memory, require_review=body.review, input_names=names,
-                                                 knowledge_base_ids=body.knowledge_base_ids if mode == 'live' else None)
+                                                 knowledge_base_ids=body.knowledge_base_ids if mode == 'live' else None,
+                                                 team_id=body.team_id, source_run_id=body.source_run_id, artifact_ids=body.artifact_ids)
                 run['uploaded_files'] = uploaded
                 store.save(run)
                 result = public_run(run, store)
@@ -717,6 +733,8 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
         try:
             with storage(request, mode) as store, store.lock():
                 run = get_run(store, run_id)
+                if body.team_id is not None and run.get('team_id') != body.team_id:
+                    raise HTTPException(404, '任务不属于当前团队。')
                 pending = run["pending"]
                 if not pending or pending["id"] != body.request_id:
                     raise HTTPException(409, "该请求已处理或已失效，请刷新任务。")
@@ -1053,12 +1071,93 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             return updated
         return mutate_knowledge(request, mode, change)
 
-    @app.get("/api/agents/{agent}/memory")
-    def memory(request: Request, agent: Agent, mode: Mode = "demo"):
+    def get_team(store: Store, team_id: str) -> dict:
+        try:
+            return Teams(store).get(team_id)
+        except ValueError:
+            raise HTTPException(404, '团队不存在或不属于当前空间。') from None
+
+    @app.get('/api/teams')
+    def list_teams(request: Request, mode: Mode = 'demo'):
         with storage(request, mode) as store:
+            return Teams(store).list()
+
+    @app.post('/api/teams', status_code=201)
+    def create_team(request: Request, body: TeamInput, mode: Mode = 'demo'):
+        target = workspace(request, mode)
+        jobs.reserve(target)
+        try:
+            with storage(request, mode) as store, store.lock():
+                return Teams(store).create(body.name, body.roles)
+        finally:
+            jobs.release(target)
+
+    @app.get('/api/teams/{team_id}')
+    def team_detail(request: Request, team_id: str, mode: Mode = 'demo', channel: Channel = 'group'):
+        with storage(request, mode) as store:
+            team = get_team(store, team_id)
+            store.bind_team(team_id)
+            runs = [r for r in store.runs() if r.get('team_id') == team_id]
+            cards = []
+            for run in runs[:30]:
+                card = public_run(run, store, False)
+                card.update(pending=run['pending'], artifacts=run['artifacts'],
+                            tasks=[{k: t[k] for k in ('id', 'title', 'owner', 'status', 'summary')} for t in run['tasks']])
+                cards.append(card)
+            conversation = 'group' if channel == 'group' else 'private:' + channel
+            return {'team': team, 'channel': channel, 'messages': store.messages(conversation, limit=100), 'runs': cards,
+                    'memory': {a: store.memory(a) for a in AGENTS}, 'job': jobs.info(store.root)}
+
+    @app.get('/api/teams/{team_id}/export')
+    def export_team(request: Request, team_id: str, mode: Mode = 'demo'):
+        with storage(request, mode) as store:
+            get_team(store, team_id)
+            result = team_audit(store, team_id, mode)
+            return JSONResponse(result, headers={'Content-Disposition': f'attachment; filename="{team_id}-audit.json"'})
+
+    @app.get('/api/teams/{team_id}/evaluation.zip')
+    def export_team_evaluation(request: Request, team_id: str, mode: Mode = 'demo'):
+        with storage(request, mode) as store:
+            get_team(store, team_id)
+            try:
+                bundle = evaluation_zip(store, team_audit(store, team_id, mode))
+            except EvaluationExportError as exc:
+                raise HTTPException(409, str(exc)) from None
+        bundle.seek(0, 2)
+        length = bundle.tell()
+        bundle.seek(0)
+        return StreamingResponse(zip_chunks(bundle), media_type='application/zip',
+            headers={'Content-Disposition': f'attachment; filename="{team_id}-evaluation.zip"',
+                     'Content-Length': str(length)}, background=BackgroundTask(bundle.close))
+
+    @app.post('/api/runs/{run_id}/rerun', status_code=202)
+    def rerun(request: Request, run_id: str, mode: Mode = 'demo'):
+        target = workspace(request, mode)
+        event = jobs.reserve(target)
+        try:
+            with storage(request, mode) as store, store.lock():
+                old = get_run(store, run_id)
+                if len(store.runs()) >= 200:
+                    raise HTTPException(429, '当前空间已达到任务上限。')
+                cfg = Config(**old['config'])
+                run = Engine(store, cfg, None).rerun(old)
+                result = public_run(run, store)
+            jobs.submit(target, run['id'], cfg, event)
+            return result
+        except Exception:
+            jobs.release(target)
+            raise
+
+    @app.get("/api/agents/{agent}/memory")
+    def memory(request: Request, agent: Agent, mode: Mode = "demo", team_id: str | None = None):
+        with storage(request, mode) as store:
+            if team_id:
+                get_team(store, team_id)
+                store.bind_team(team_id)
             return store.memory(agent)
 
     @app.get("/api/chat")
+<<<<<<< HEAD
     def chat_history(request: Request, channel: Channel = "group", mode: Mode = "demo", run_id: str | None = None):
         with storage(request, mode) as store:
             if run_id:
@@ -1068,6 +1167,14 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
             if channel == 'group':
                 return team_messages(store, run_id=run_id)
             return store.messages('private:' + channel, limit=100, metadata=True)
+=======
+    def chat_history(request: Request, channel: Channel = "group", mode: Mode = "demo", team_id: str | None = None):
+        with storage(request, mode) as store:
+            if team_id:
+                get_team(store, team_id)
+                store.bind_team(team_id)
+            return store.messages("group" if channel == "group" else "private:" + channel, limit=100)
+>>>>>>> b8fb6de (增加自定义agent功能)
 
     @app.post("/api/chat")
     def chat(request: Request, body: ChatInput, mode: Mode = "demo"):
@@ -1077,15 +1184,34 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
         jobs.reserve(target)
         try:
             with storage(request, mode) as store, store.lock():
+                team = get_team(store, body.team_id) if body.team_id else None
+                store.bind_team(body.team_id)
                 channel = "group" if body.channel == "group" else "private:" + body.channel
                 agent = "coordinator" if body.channel == "group" else body.channel
                 store.message(channel, "human", body.message.strip())
                 try:
-                    result = make_provider(run_config(mode)).complete("chat", {
-                        "agent": agent, "channel": channel, "history": store.messages(channel, agent)})
-                    reply = result.get("reply")
-                    if not isinstance(reply, str) or not reply.strip():
-                        raise ValueError("Invalid reply")
+                    from ..interaction import INTERACTION_POLICY, chinese_prose
+                    config = run_config(mode)
+                    provider = make_provider(config)
+                    context = {
+                        "agent": agent, "channel": channel, "history": store.messages(channel, agent),
+                        'team': team, 'role_profile': team['roles'][agent] if team else None,
+                        'interaction_policy': INTERACTION_POLICY}
+                    for attempt in range(2):
+                        result = provider.complete('chat', context)
+                        reply = result.get('reply')
+                        try:
+                            if not isinstance(reply, str) or not reply.strip():
+                                raise ValueError('回复不能为空。')
+                            if config.provider != 'demo':
+                                chinese_prose(reply, '对话回复')
+                                if len(reply) > 600 or reply.count('?') + reply.count('？') > 1:
+                                    raise ValueError('请用不超过 600 字的中文简短回复，每次最多问一个问题。')
+                            break
+                        except ValueError as exc:
+                            if attempt == 1:
+                                raise
+                            context.update(validation_error=str(exc), previous_reply=reply)
                 except (ValueError, RuntimeError, OSError) as exc:
                     # APIProvider returns sanitized errors, no upstream bodies/headers.
                     error = str(exc)[:500]
