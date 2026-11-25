@@ -4,7 +4,10 @@ Execution cards are controller-authored status summaries, not invented model dia
 Existing messages, events and private-channel visibility remain unchanged.
 """
 import json
+from functools import partial
 from pathlib import Path
+
+from .interaction import task_text
 
 EVENT_KINDS = (
     'run_created', 'plan_created', 'task_assigned', 'delegated', 'artifact_handoff',
@@ -34,11 +37,12 @@ def team_messages(store, run_id=None, limit=200, team_id=None):
 
     for event in events:
         run = load(event['run_id'])
+        text = partial(task_text, run)
         data = json.loads(event['data'])
         tasks = {t['id']: t for t in run['tasks']}
         task_id = data.get('task_id') or data.get('to_task') or data.get('target_task')
         task = tasks.get(task_id, {})
-        title = data.get('title') or task.get('title') or '子任务'
+        title = data.get('title') or task.get('title') or text('子任务', 'Subtask')
         sender = event['agent'] or 'coordinator'
         kind = event['kind']
         part = 0
@@ -48,7 +52,7 @@ def team_messages(store, run_id=None, limit=200, team_id=None):
             part += 1
             result.append({'id': f"event:{event['seq']}:{part}", 'sender': author,
                            'recipient': recipient, 'body': body, 'created': event['created'],
-                           'source': 'execution', 'kind': card_kind, 'label': label or '执行动态',
+                           'source': 'execution', 'kind': card_kind, 'label': label or text('执行动态', 'Task update'),
                            'run_id': run['id'], 'run_goal': run['goal'], 'task_id': task_id,
                            'task_title': title if task_id else None, '_order': (event['seq'], part)})
 
@@ -66,49 +70,59 @@ def team_messages(store, run_id=None, limit=200, team_id=None):
 
         if kind == 'run_created':
             legacy(exact=run['goal'], author='human')
-            add(run['goal'], author='human', label='任务目标')
+            add(run['goal'], author='human', label=text('任务目标', 'Task goal'))
         elif kind == 'plan_created':
             planned = data.get('tasks', [])
             lines = [f"{n}. {t['title']}" for n, t in enumerate(planned, 1)]
-            add('已拆分任务，按依赖关系安排执行：\n' + '\n'.join(lines), author='coordinator', label='协作计划')
+            add(text('已拆分任务，按依赖关系安排执行：\n', 'Planned tasks in dependency order:\n') + '\n'.join(lines),
+                author='coordinator', label=text('协作计划', 'Task plan'))
         elif kind == 'task_assigned':
-            legacy(exact=f"接受任务 {task_id}: {title}")
+            legacy(exact=text(f"接受任务 {task_id}: {title}", f"Accepted task {task_id}: {title}"))
             objective = data.get('objective') or task.get('objective', '')
-            add(f"请负责「{title}」。" + ('\n' + objective if objective else ''),
-                author='coordinator', recipient=sender, label='分配任务', card_kind='assignment')
-            add(f"收到，开始处理「{title}」。", recipient='coordinator', label='已接收任务', card_kind='acknowledgement')
+            add(text(f"请负责「{title}」。", f"Please take on ‘{title}’.") + ('\n' + objective if objective else ''),
+                author='coordinator', recipient=sender, label=text('分配任务', 'Assignment'), card_kind='assignment')
+            add(text(f"收到，开始处理「{title}」。", f"Accepted ‘{title}’ and starting work."),
+                recipient='coordinator', label=text('已接收任务', 'Task accepted'), card_kind='acknowledgement')
         elif kind == 'delegated':
-            add(f"需要协助处理「{title}」，已提交子任务委派。", recipient=data.get('role'), label='委派协作')
+            add(text(f"需要协助处理「{title}」，已提交子任务委派。", f"Delegated ‘{title}’ for assistance."),
+                recipient=data.get('role'), label=text('委派协作', 'Delegation'))
         elif kind == 'artifact_handoff':
             artifact = next((a for a in run['artifacts'] if a['id'] == data.get('artifact_id')), None)
             if artifact:
                 task_id = artifact['task_id']
                 title = tasks.get(task_id, {}).get('title', '资料交接')
-                add(f"已交接「{Path(artifact['path']).name}」，可继续后续工作。",
-                    author=artifact['owner'], recipient=sender, label='资料交接')
+                filename = Path(artifact['path']).name
+                add(text(f"已交接「{filename}」，可继续后续工作。", f"Handed off ‘{filename}’ for follow-up work."),
+                    author=artifact['owner'], recipient=sender, label=text('资料交接', 'File handoff'))
         elif kind == 'task_succeeded':
-            prefix = f"任务 {task_id} 通过声明的检查："
+            prefix = text(f"任务 {task_id} 通过声明的检查：", f"Task {task_id} passed the declared checks: ")
             previous = legacy(prefix=prefix)
             summary = data.get('summary') or (previous[len(prefix):] if previous else '')
-            add(f"「{title}」已通过声明的检查。" + ('\n' + summary if summary else ''),
-                recipient='coordinator', label='完成反馈')
+            add(text(f"「{title}」已通过声明的检查。", f"‘{title}’ passed the declared checks.") + ('\n' + summary if summary else ''),
+                recipient='coordinator', label=text('完成反馈', 'Task completed'))
         elif kind == 'attempt_failed':
-            legacy(prefix=f"任务 {task_id} 尝试失败：")
-            add(f"「{title}」执行遇到问题：\n{data.get('observed_error', '请查看任务记录')[:1500]}",
-                recipient='coordinator', label='问题反馈')
+            legacy(prefix=text(f"任务 {task_id} 尝试失败：", f"Task {task_id} attempt failed: "))
+            error = data.get('observed_error', text('请查看任务记录', 'See the task record'))
+            add(text(f"「{title}」执行遇到问题：\n", f"‘{title}’ encountered a problem:\n") + error[:1500],
+                recipient='coordinator', label=text('问题反馈', 'Task problem'))
         elif kind == 'waiting_human':
-            add(data.get('question', '需要你的确认'), recipient='human', label='等待确认')
+            add(data.get('question', text('需要你的确认', 'Your input is needed')),
+                recipient='human', label=text('等待确认', 'Waiting for input'))
         elif kind == 'human_reply':
-            add(data.get('reply', ''), author='human', recipient='coordinator', label='用户回复')
+            add(data.get('reply', ''), author='human', recipient='coordinator', label=text('用户回复', 'User reply'))
         elif kind == 'revision_requested':
-            legacy(prefix=f"第 {data.get('round')} 轮返修：退回 {data.get('target_task')}。")
-            add('请根据验证反馈修订：\n' + data.get('reason', ''), recipient=task.get('owner'), label='返修反馈')
+            number, target = data.get('round'), data.get('target_task')
+            legacy(prefix=text(f"第 {number} 轮返修：退回 {target}。", f"Revision round {number}: returned {target} to the author."))
+            add(text('请根据验证反馈修订：\n', 'Please revise based on verification feedback:\n') + data.get('reason', ''),
+                recipient=task.get('owner'), label=text('返修反馈', 'Revision feedback'))
         elif kind == 'run_cancelled':
-            add('已请求停止任务。', author='human', label='停止任务')
+            add(text('已请求停止任务。', 'Stop requested.'), author='human', label=text('停止任务', 'Stop task'))
         elif kind == 'run_finished':
-            status = {'succeeded': '本次任务已完成，交付文件可在任务详情查看。',
-                      'failed': '本次任务未完成，请查看问题记录。', 'cancelled': '本次任务已停止。'}
-            add(status.get(data.get('status'), '本次执行已结束。'), author='coordinator', label='任务状态')
+            status = {'succeeded': text('本次任务已完成，交付文件可在任务详情查看。', 'Task completed. See task details for the deliverables.'),
+                      'failed': text('本次任务未完成，请查看问题记录。', 'Task failed. See the task record for details.'),
+                      'cancelled': text('本次任务已停止。', 'Task stopped.')}
+            add(status.get(data.get('status'), text('本次执行已结束。', 'Run ended.')),
+                author='coordinator', label=text('任务状态', 'Run status'))
 
     if not run_id:
         # Keep ordinary conversations, including older ones when there are few/no events.

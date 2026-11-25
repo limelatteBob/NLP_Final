@@ -16,5 +16,8 @@ build/
 dist/
 *.egg-info/
 temp_file/
+.idea/
+.DS_Store
 
 Mid_Test/
+Pre/

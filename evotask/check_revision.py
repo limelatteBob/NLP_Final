@@ -2,6 +2,7 @@
 import copy
 import difflib
 import json
+from .interaction import task_text
 from .storage import digest
 
 def signature(check):
@@ -24,7 +25,9 @@ def propose(engine,run,task,action):
     old=json.dumps(original,ensure_ascii=False,indent=2);new=json.dumps(check,ensure_ascii=False,indent=2)
     prepared={'check_index':index,'old_check':copy.deepcopy(original),'old_hash':signature(original),'check':check,'reason':reason,
               'diff':''.join(difflib.unified_diff(old.splitlines(True),new.splitlines(True),fromfile='original-check',tofile='proposed-check'))}
-    engine.wait(run,task,'check_revision','验收检查与实际界面或需求不一致。是否批准以下检查修订？修订后必须重新验证。',action,prepared)
+    question = task_text(run, '验收检查与实际界面或需求不一致。是否批准以下检查修订？修订后必须重新验证。',
+                         'The check conflicts with the interface or requirements. Approve the correction and rerun verification?')
+    engine.wait(run, task, 'check_revision', question, action, prepared)
 
 def apply(engine,run,task,pending,reply):
     if reply.lower() not in {'yes','no'}:raise ValueError('Check revision reply must be yes or no')
