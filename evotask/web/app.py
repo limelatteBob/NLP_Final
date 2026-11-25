@@ -1204,7 +1204,7 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                 agent = "coordinator" if body.channel == "group" else body.channel
                 store.message(channel, "human", body.message.strip())
                 try:
-                    from ..interaction import INTERACTION_POLICY, chinese_prose
+                    from ..interaction import INTERACTION_POLICY
                     config = run_config(mode)
                     provider = make_provider(config)
                     context = {
@@ -1217,10 +1217,8 @@ def create_app(config: Config | None = None, state_dir: Path | None = None,
                         try:
                             if not isinstance(reply, str) or not reply.strip():
                                 raise ValueError('回复不能为空。')
-                            if config.provider != 'demo':
-                                chinese_prose(reply, '对话回复')
-                                if len(reply) > 600 or reply.count('?') + reply.count('？') > 1:
-                                    raise ValueError('请用不超过 600 字的中文简短回复，每次最多问一个问题。')
+                            if config.provider != 'demo' and (len(reply) > 600 or reply.count('?') + reply.count('？') > 1):
+                                raise ValueError('Keep the reply within 600 characters and ask at most one question.')
                             break
                         except ValueError as exc:
                             if attempt == 1:
