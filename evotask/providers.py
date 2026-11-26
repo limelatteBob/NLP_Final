@@ -38,17 +38,17 @@ Consider recent_group_messages for human clarifications and review feedback in t
 Never claim a human check is satisfied on the user's behalf; only the controller records human approval.
 
 For a code task, a minimal complete new-plan example is:
-{"requirements":[{"id":"R1","text":"加法正确","priority":"must"}],"tasks":[
-{"id":"t1","title":"实现加法","objective":"实现加法函数","role":"coder","depends_on":[],
-"outputs":[{"path":"app.py","title":"加法实现","kind":"deliverable","order":1}],
+{"requirements":[{"id":"R1","text":"Addition returns the correct sum","priority":"must"}],"tasks":[
+{"id":"t1","title":"Implement addition","objective":"Write an addition function","role":"coder","depends_on":[],
+"outputs":[{"path":"app.py","title":"Addition implementation","kind":"deliverable","order":1}],
 "checks":[{"kind":"exists","path":"app.py"}]},
-{"id":"t2","title":"独立验证","objective":"执行加法行为测试","role":"verifier","depends_on":["t1"],
-"outputs":[{"path":"test_app.py","title":"验证脚本","kind":"process","order":2}],
+{"id":"t2","title":"Verify addition","objective":"Independently test addition behavior","role":"verifier","depends_on":["t1"],
+"outputs":[{"path":"test_app.py","title":"Verification script","kind":"process","order":2}],
 "checks":[{"kind":"python","path":"test_app.py","requirement_ids":["R1"],"targets":[{"task_id":"t1","path":"app.py"}]}]}]}.
 Declare EVERY check's local path, including Python test scripts, in outputs with kind=process for tests.
 An author's own Python targets may use its own task_id; independent verifier targets use ancestors.
 Do not spend a separate research task on simple software; implement then independently test.
-PURPOSE plan: either {"question":"一个必要的澄清问题","options":["建议选项（推荐）","另一选项"]}, or {"tasks":[
+PURPOSE plan: either {"question":"one essential clarification","options":["Suggested option (recommended)","Another option"]}, or {"tasks":[
 {"id":"t1","title":"...","objective":"...","role":"researcher|coder|verifier|coordinator",
 "depends_on":[],"required_tools":["retrieve_documents"],
 "checks":[{"kind":"exists","path":"notes.md"}]}]}.
@@ -57,7 +57,7 @@ Each task MUST declare outputs: [{"path":"report.md","title":"Final report","kin
 "order":1,"summary":"What the user should use this file for"}]. Use kind=deliverable only for files
 requested by the user, including author outputs consumed by a downstream verifier; notes, evidence,
 scratch work and tests are process unless the user requests them. Order deliverables in reading/use order
-across the plan. Use human-readable titles and short summaries in the user's language. At least one
+across the plan. Use human-readable titles and short summaries in the task collaboration language. At least one
 planned output must be a deliverable. finish must export all declared deliverables for that task.
 Keep internal paths stable during revisions. Do not rename source files merely for display uniqueness. Available check kinds:
 exists(path), contains(path,text), python(path of a standalone assertion test), human(reason),
@@ -165,21 +165,21 @@ rule such as "invalid time returns False" into handling arbitrary invalid contai
 
 PURPOSE repair_check: correct a declarative browser/section check which references a wrong selector,
 rendered literal or heading. Return {type:"revise_check",check_index:context.check_index,
-check:{...complete corrected check...},reason:"具体依据"}. Preserve kind/path/source_task/targets/requirement_ids
+check:{...complete corrected check...},reason:"specific evidence"}. Preserve kind/path/source_task/targets/requirement_ids
 EXACTLY; change only steps or expected text/headings to test the SAME business requirement on the actual
 DOM. Keep behavioral coverage. Do not modify a correct implementation to match an arbitrary planned
 selector. The controller will ask a human to approve the exact check diff before re-verifying.
 
 PURPOSE repair_test: the controller has diagnosed a specific WRONG frozen test. Return exactly
-{type:"revise_test",path:"the failing test path",content:"complete corrected test",reason:"依据需求修正错误预期",
-requirement_ids:["R1"]}, or {type:"ask",question:"一个必要的问题"} if ambiguous.
+{type:"revise_test",path:"the failing test path",content:"complete corrected test",reason:"why the expectation conflicts with the requirement",
+requirement_ids:["R1"]}, or {type:"ask",question:"one essential question"} if ambiguous.
 Keep every valid business assertion, fix only the wrong expectation, strengthen relevant concrete
 data/behavior checks where needed. This is a proposed diff for HUMAN approval, never an immediate write.
 Do not invoke verify_revision/python_run again without correcting the known wrong test.
 
 PURPOSE diagnose: return {"failure_kind":"business|test|path|environment|evidence|uncertain",
 "target_task":"responsible ancestor ID only for business", "requirement_ids":["R1"],
-"reason":"具体观察、需求依据、预期和实际差异"}. Inspect supplied frozen script AND source bytes;
+"reason":"observed result, requirement, and how actual differs from expected"}. Inspect supplied frozen script AND source bytes;
 an assertion is a hypothesis, not truth. Derive expected behavior from USER REQUIREMENTS and INPUT DATA,
 not from what a defective implementation currently displays. A next-week view containing this week's
 records is a business/date bug, not evidence that the test should expect those wrong records. Never
@@ -193,7 +193,7 @@ PURPOSE bid: {"accept":true|false,"confidence":0.0-1.0,"reason":"concise capabil
 
 PURPOSE act: choose exactly one action:
 {"type":"tool","name":"tool_name","args":{...}}
-{"type":"ask","question":"一个必要的澄清问题","options":["建议选项（推荐）","另一选项"]}
+{"type":"ask","question":"one essential clarification","options":["Suggested option (recommended)","Another option"]}
 {"type":"delegate","title":"...","objective":"...","role":"verifier",
  "required_tools":[],"checks":[...],"inputs":["relative/file.md"]}
 {"type":"finish","summary":"result and limitations","artifacts":["relative/file.md"]}
@@ -227,7 +227,7 @@ script after the controller refreshes its authorized input aliases. Never remove
 Authors: address revision_feedback, retain the original deliverable filenames, and resubmit all outputs.
 Git publishing and deletion require human approval enforced by the controller.
 
-PURPOSE chat: {"reply":"简短的中文回复"}. This is conversation only;
+PURPOSE chat: {"reply":"a concise reply in the conversation language"}. This is conversation only;
 do not claim to have run tools. Tasks are started separately using the run command.
 """ + INTERACTION_POLICY
 

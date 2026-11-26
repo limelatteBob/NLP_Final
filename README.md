@@ -117,7 +117,7 @@ Web 数据保存在 `.evotask-web/`；备份与恢复见 [账号手册](docs/acc
 
 Web data is stored in `.evotask-web/`. For backup and recovery instructions, see the [Account Guide](docs/accounts.md#存储与认证).
 
-团队页支持群聊及 Agent 私聊。真实模型统一用中文回复和撰写交付正文；每次只问一个关键问题，可点选简短答案或自行填写。删除和发布操作仍需明确确认。
+团队页支持群聊及 Agent 私聊。任务中的交流沿用任务语言，普通聊天回复沿用用户消息的语言。交付物按任务要求撰写，包括代码注释和面向用户的提示。每次只问一个关键问题，可以点选答案或自行填写。删除和发布操作需要明确确认。
 
 The team page supports group chats and private conversations with agents. Live models reply in Chinese and write the body of deliverables in Chinese. They ask one key question at a time, and you can select a short answer or enter your own. Deleting and publishing still require explicit confirmation.
 

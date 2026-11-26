@@ -165,11 +165,9 @@ class Engine:
                 plan = self.model(run, 'plan', context)
                 self.emit(run, 'coordinator', 'plan_received', {'attempt': attempt + 1, 'plan': plan})
                 if plan.get('question'):
-                    question, options = clarification(plan, chinese=self.config.provider != 'demo')
+                    question, options = clarification(plan)
                     self.wait(run, None, 'planning', question, options=options)
                     return None
-                if self.config.provider != 'demo':
-                    validate_plan_language(plan)
                 specs = plan.get('tasks')
                 if isinstance(specs, list):
                     specs = [self.role_spec(run, spec) for spec in specs]
@@ -186,7 +184,7 @@ class Engine:
                 if attempt == 2:
                     raise
                 context.update(previous_plan=plan, validation_error=str(exc),
-                               correction='Correct the validation error and follow the Chinese interaction policy. No tasks or tools have executed. Use the four internal role IDs.')
+                               correction='Correct the validation error and follow the task language policy. No tasks or tools have executed. Use the four internal role IDs.')
         raise RuntimeError('Plan validation failed')
 
     def cancel(self, run: dict) -> dict:
@@ -235,6 +233,7 @@ class Engine:
                "initial_memory_hashes": {a: digest(json.dumps(self.store.memory(a), sort_keys=True).encode()) for a in AGENTS},
                "initial_inputs": [], "failure": None, "finish_recorded": False, "require_review": require_review,
                "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2, "execution_schema": 4, "requirements": [],
+
                'team_id': team_id, 'team_snapshot': team, 'group_history': history,
                'inherited_inputs': [], 'input_manifest': []}
         self.bind_run(run)
@@ -294,7 +293,7 @@ class Engine:
     def model(self, run: dict, purpose: str, context: dict) -> dict:
         self.bind_run(run)
         context = dict(context, current_time_utc=datetime.now(timezone.utc).isoformat(),
-                       interaction_policy=INTERACTION_POLICY, clarifications=run['clarifications'])
+                       task_goal=run['goal'], interaction_policy=INTERACTION_POLICY, clarifications=run['clarifications'])
         if run.get('team_snapshot'):
             context = dict(context, team=run['team_snapshot'],
                            role_profile=run['team_snapshot']['roles'][context.get('agent', 'coordinator')],
@@ -459,7 +458,8 @@ class Engine:
                 atomic_json(self.store.memory_path(task['owner']), memories)
         run.update(status='running', pending=None, failure=None, ended=None, finish_recorded=False)
         self.emit(run, verifier['owner'], 'revision_requested', feedback)
-        self.store.message('group', verifier['owner'], f"第 {number} 轮返修：退回 {target['id']}。{reason[:500]}；保留原验收要求并重新验证。")
+        self.store.message('group', verifier['owner'], task_text(run, f"第 {number} 轮返修：退回 {target['id']}。{reason[:500]}；保留原验收要求并重新验证。",
+                                     f"Revision round {number}: returned {target['id']} to the author. {reason[:500]} Recheck against the original criteria."))
         self.store.save(run)
         return feedback
 
@@ -569,7 +569,8 @@ class Engine:
              prepared: dict | None = None, options: list[str] | None = None) -> None:
         if kind in {'planning', 'clarification'} and any(
                 item['question'].strip() == question.strip() for item in run['clarifications']):
-            raise ValueError('这个问题已得到回答，请读取 clarifications 并继续；仅对新的阻塞信息提问。')
+            raise ValueError(task_text(run, '这个问题已得到回答，请读取 clarifications 并继续；仅对新的阻塞信息提问。',
+                                       'This question has already been answered. Use clarifications and ask only about new blockers.'))
         pending = {"id": uid("request"), "task_id": task["id"] if task else None, "kind": kind,
                    "question": question, "options": options or [], "action": action, "prepared": prepared, "created": time.time()}
         run["pending"], run["status"] = pending, "waiting_human"
@@ -598,7 +599,7 @@ class Engine:
             if type(bid.get("accept")) is not bool or not isinstance(bid.get("reason"), str):
                 raise ValueError("Malformed capability bid")
             if self.config.provider != 'demo':
-                chinese_prose(bid['reason'], '分工理由')
+                require_prose(bid['reason'], 'Bid reason')
             confidence = bid.get("confidence", 0)
             if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
                 raise ValueError("Bid confidence must be between 0 and 1")
@@ -618,7 +619,7 @@ class Engine:
             task["memory_hits"] = recall(self.store, task["owner"], task["objective"])
         self.emit(run, task["owner"], "memory_recalled", {"task_id": task["id"], "ids": [m["id"] for m in task["memory_hits"]]})
         self.emit(run, task["owner"], "task_assigned", {"task_id": task["id"], "title": task["title"], "objective": task["objective"]})
-        self.store.message("group", task["owner"], f"接受任务 {task['id']}: {task['title']}")
+        self.store.message("group", task["owner"], task_text(run, "接受任务", "Accepted task") + f" {task['id']}: {task['title']}")
         self.store.save(run)
 
     def fail_attempt(self, run: dict, task: dict, action: dict, exc: Exception, terminal: bool = False) -> None:
@@ -642,7 +643,8 @@ class Engine:
                   "cause_hypothesis": None, "artifact_ids": [a["id"] for a in snapshot]}
         task["history"].append({"action": action, "result": {"success": False, **record}})
         self.emit(run, task["owner"] or "coordinator", "attempt_failed", {"task_id": task["id"], **record})
-        self.store.message("group", task["owner"] or "coordinator", f"任务 {task['id']} 尝试失败：{message[:300]}；已有产物已归档。")
+        self.store.message("group", task["owner"] or "coordinator", task_text(run, f"任务 {task['id']} 尝试失败：{message[:300]}；已有产物已归档。",
+                                     f"Task {task['id']} attempt failed: {message[:300]}. Partial outputs archived."))
         if terminal or task["error_streak"] >= 3:
             task["status"], task["summary"] = "failed", message
         self.store.save(run)
@@ -691,7 +693,6 @@ class Engine:
             if self.config.provider != 'demo' and not frozen:
                 if target.stat().st_size > self.config.max_file_bytes:
                     raise ValueError('交付文件超过配置的大小限制。')
-                validate_deliverable(target)
         required_outputs = {o['path'] for o in task.get('outputs', []) if o['kind'] == 'deliverable'}
         if not required_outputs <= set(paths):
             raise ValueError('finish must export every declared deliverable: ' + ', '.join(sorted(required_outputs - set(paths))))
@@ -730,7 +731,8 @@ class Engine:
                 if kind == "human":
                     if not approved:
                         reasons = [c["reason"] for c in task["checks"] if c["kind"] == "human"]
-                        self.wait(run, task, "acceptance", "是否接受本次交付？可先查看文件及验收要求。", action,
+                        self.wait(run, task, "acceptance", task_text(run, "是否接受本次交付？可先查看文件及验收要求。",
+                                            "Accept this delivery? You can review the files and acceptance criteria first."), action,
                                   {"artifacts": artifacts, "review_checks": reasons})
                         return
                     outcomes.append({"kind": "human", "passed": True})
@@ -814,7 +816,8 @@ class Engine:
         task["summary"] = str(action.get("summary", ""))[:3000]
         task["history"].append({"action": action, "result": {"checks": outcomes, "success": True}})
         self.emit(run, task["owner"], "task_succeeded", {"task_id": task["id"], "artifacts": task["artifact_ids"], "checks": outcomes, "summary": task["summary"]})
-        self.store.message("group", task["owner"], f"任务 {task['id']} 通过声明的检查：{task['summary']}")
+        self.store.message("group", task["owner"], task_text(run, f"任务 {task['id']} 通过声明的检查：{task['summary']}",
+                                     f"Task {task['id']} passed the declared checks: {task['summary']}"))
         if run["memory_enabled"]:
             self.store.remember(task["owner"], {"id": f"{run['id']}:{task['id']}:success:{run.get('revision_count', 0)}", "run_id": run["id"],
                 "trigger": task["objective"], "lesson": "此前类似任务通过以下检查；仍需在新任务重验：" + json.dumps(task["checks"], ensure_ascii=False),
@@ -933,7 +936,8 @@ class Engine:
             raise ValueError('Proposed test has no changes')
         prepared = {'path':path,'old_hash':digest(old),'content':content,'reason':reason,'requirement_ids':ids,
                     'diff':''.join(difflib.unified_diff(old.decode().splitlines(True),content.splitlines(True),fromfile='frozen',tofile='proposed'))}
-        self.wait(run,task,'test_revision','测试与需求存在冲突。是否批准以下测试修订？修改后必须重新验证。',action,prepared)
+        self.wait(run,task,'test_revision',task_text(run, '测试与需求存在冲突。是否批准以下测试修订？修改后必须重新验证。',
+                      'The test conflicts with the requirements. Approve the proposed revision and rerun verification?'), action, prepared)
 
     def normalize_decision(self, run: dict, task: dict, action: dict) -> dict:
         normalized = normalize_action(action)
@@ -949,7 +953,7 @@ class Engine:
         if self.config.provider != 'demo' and not approved:
             for field in {'finish': ('summary',), 'delegate': ('title', 'objective'),
                           'fail': ('reason',), 'request_revision': ('reason',)}.get(kind, ()):
-                chinese_prose(action.get(field, ''), field)
+                require_prose(action.get(field, ''), field)
         if kind == 'revise_check':
             if guard.enabled(self, run) and guard.reviewed_kind(run, task) != 'test':
                 if not task.get('last_verification'):
@@ -980,7 +984,7 @@ class Engine:
             self.request_revision(run, task, str(action.get('reason', '')), action.get('target_task'))
             return
         if kind == "ask":
-            question, options = clarification(action, chinese=self.config.provider != 'demo')
+            question, options = clarification(action)
             self.wait(run, task, "clarification", question, action, options=options)
             return
         if kind == "finish":
@@ -997,8 +1001,11 @@ class Engine:
             if not approved:
                 prepared = self.tools.prepare(run, task, name, args)
                 if prepared:
-                    label = '发布代码到 GitHub' if name == 'git_publish' else '删除文件'
-                    self.wait(run, task, "tool_approval", f"是否允许{label}？请先核对下方的文件与目标。", action, prepared)
+                    label = (task_text(run, '发布代码到 GitHub', 'publishing code to GitHub') if name == 'git_publish'
+                             else task_text(run, '删除文件', 'deleting the file'))
+                    question = task_text(run, f"是否允许{label}？请先核对下方的文件与目标。",
+                                         f"Allow {label}? Review the files and target first.")
+                    self.wait(run, task, "tool_approval", question, action, prepared)
                     return
             run["inflight"] = {"task_id": task["id"], "action": action, "started": time.time()}
             self.store.save(run)  # Never silently replay a potentially side-effecting operation after a crash.
@@ -1072,7 +1079,8 @@ class Engine:
                     upstream = {dependency for task in run["tasks"] for dependency in task["depends_on"]}
                     for task in run["tasks"]:
                         if task["id"] not in upstream and not any(c["kind"] == "human" for c in task["checks"]):
-                            task["checks"].append({"kind": "human", "reason": "请检查最终产物及引用来源，是否接受这个版本？"})
+                            task["checks"].append({"kind": "human", "reason": task_text(run, "请检查最终产物及引用来源，是否接受这个版本？",
+                                                                   "Review the final outputs and sources. Do you accept this version?")})
                 run["status"] = "running"
                 self.emit(run, "coordinator", "plan_created", {"tasks": run["tasks"]})
                 self.store.save(run)
@@ -1133,7 +1141,8 @@ class Engine:
                     run["inflight"] = None
                     if isinstance(exc,ReviewBlocked):
                         task['history'].append({'event':'review_blocked','review':exc.review})
-                        self.wait(run,task,'review_blocked','独立审查缺少足够证据，暂不能交付。请补充来源或说明需要调整的要求。',action,{'review':exc.review})
+                        self.wait(run,task,'review_blocked',task_text(run, '独立审查缺少足够证据，暂不能交付。请补充来源或说明需要调整的要求。',
+                                                      'Independent review needs more evidence. Please add sources or clarify the requirements.'), action, {'review':exc.review})
                         continue
                     self.fail_attempt(run, task, action, exc, terminal=(
                         task["steps"] >= self.config.max_task_steps or run["model_calls"] >= self.config.max_model_calls
@@ -1210,7 +1219,7 @@ class Engine:
             run['human_wait_seconds'] += time.time() - pending['created']
             self.emit(run, 'human', 'quality_revision_requested' , {'task_id': task['id'], 'reason': reason, 'request_id':request_id})
             run['clarifications'].append({'question':'交付验收修改意见', 'answer':reason, 'task_id':task['id']})
-            self.store.message('group','human','质量反馈（'+task['id']+'）：'+reason)
+            self.store.message('group','human',task_text(run, f"质量反馈（{task['id']}）：", f"Quality feedback ({task['id']}): ") + reason)
             if task['role']=='verifier' and any(t['status']=='succeeded' and t['id'] in task['depends_on'] for t in run['tasks']):
                 # Give the independent verifier the feedback; it must diagnose the responsible task.
                 task['history'].append({'event':'human_quality_feedback','reason':reason})
@@ -1269,7 +1278,8 @@ class Engine:
                 raise
             except Exception as exc:
                 self.fail_attempt(run,task,{'type':'verification','path':check['path']},exc)
-                self.wait(run,task,'verification_blocked','测试修订已记录，但复验暂未完成。请处理环境或输入问题后回复继续。',prepared={'error':str(exc)[:2000]})
+                self.wait(run,task,'verification_blocked',task_text(run, '测试修订已记录，但复验暂未完成。请处理环境或输入问题后回复继续。',
+                                                   'The test revision is saved. Resolve the environment or input issue and reply to resume verification.'), prepared={'error':str(exc)[:2000]})
             finally:
                 run['active_seconds']+=time.monotonic()-started
                 self.store.save(run)
