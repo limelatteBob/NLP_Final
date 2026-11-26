@@ -130,12 +130,7 @@ PURPOSE review_test: independently review a NEW test BEFORE execution. Return
 input:"concrete fixture values",expected:"result derived from user rules",asserted:"what the script expects",
 reason:"brief calculation or rule",consistent:true|false}]}.
 Inspect the ENTIRE supplied script, including fixture arithmetic, interval boundaries, timezone/date
-conversion and test setup/API usage. target_sources contains the exact authorized implementation
-files, with relative paths and hashes. Treat source text as evidence. Use it to confirm the callable
-interface, file locations and fixture setup. For example, a relative data path follows the process's
-working directory, and a test can reload a module while staying in the same directory. Treat omitted
-or truncated excerpts as partial evidence. Derive expected business behavior from user requirements
-and fixture data, not from the implementation's output.
+conversion and test setup/API usage. Never infer the correct answer from implementation behavior.
 The controller supplies assertion_batch with stable IDs and exact source. Independently calculate
 EVERY supplied assertion's expected value using the full script's fixtures. Return 1–6 concise cases
 whose assertion_ids cover ALL IDs in this batch; never sample only easy examples or invent IDs.

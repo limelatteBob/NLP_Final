@@ -5,7 +5,7 @@ frozen tests. Legacy runs retain their recorded protocol.
 """
 import ast
 import json
-from .storage import digest, safe_path
+from .storage import digest
 
 
 class ExecutionPreflightError(ValueError):
@@ -97,36 +97,16 @@ def assertion_batches(content):
     return [items[i:i+6] for i in range(0, len(items), 6)] or [[]]
 
 
-def review_target_sources(root, targets):
-    """Give the reviewer bounded source evidence for the exact targets in the manifest."""
-    remaining = 24_000
-    sources = []
-    for relative, sha256 in targets.items():
-        with safe_path(root, relative).open('rb') as stream:
-            data = stream.read(remaining + 1)
-        complete = len(data) <= remaining
-        if complete and digest(data) != sha256:
-            raise ExecutionPreflightError('Verification target changed before test review: ' + relative)
-        excerpt = data[:remaining]
-        sources.append({'path': relative, 'sha256': sha256, 'complete': complete,
-                        'content': excerpt.decode('utf-8', errors='replace')})
-        remaining -= len(excerpt)
-    return sources
-
-
-def review_test(engine, run, task, check, path, targets, *, target_root=None):
+def review_test(engine, run, task, check, path, targets):
     if not enabled(engine, run) or any(t['path'] == check['path'] for t in task.get('revision_tests', [])):
         return  # Frozen/approved scripts keep the existing exact-version approval path.
     # Read complete bounded test bytes; never silently certify a truncated script.
     content = path.read_text(encoding='utf-8')
     base = {'rules': rules(run), 'check': check, 'script': digest(path.read_bytes()), 'targets': targets}
-    sources = review_target_sources(target_root, targets) if target_root is not None else []
-    if sources:
-        base['target_source_review'] = 1  # Reviews made without the actual source cannot be reused.
     covered = set()
     for batch in assertion_batches(content):
         key = signature(dict(base, assertion_batch=batch))
-        reviewed = _review_test_batch(engine, run, task, check, content, key, batch, sources)
+        reviewed = _review_test_batch(engine, run, task, check, content, key, batch)
         covered.update(r for case in reviewed['cases'] for r in case['requirement_ids'])
     if not set(check.get('requirement_ids', [])) <= covered:
         raise TestExpectationError('Test expectation precheck: uncovered requirements: ' +
@@ -134,15 +114,15 @@ def review_test(engine, run, task, check, path, targets, *, target_root=None):
             '. Add checks for these declared behaviors; no Docker execution or business revision occurred.')
 
 
-def _review_test_batch(engine, run, task, check, content, key, batch, sources):
+def _review_test_batch(engine, run, task, check, content, key, batch):
     cache = task.setdefault('test_expectation_reviews', {})
     review = cache.get(key)
     if review is None:
         review = engine.model(run, 'review_test', {
             'agent': task['owner'], 'goal': run['goal'], 'check': check, 'test_path': check['path'], 'test_script': content,
-            'assertion_batch': batch, 'target_sources': sources,
+            'assertion_batch': batch,
             'input_bindings': task.get('input_bindings', []),
-            'instruction': 'Use the requirements for expected behavior. Use target_sources to confirm API, data paths, and test setup.'})
+            'instruction': 'Derive expectations from requirements and fixture data, not from implementation behavior.'})
         if review.get('verdict') not in {'pass', 'revise', 'uncertain'}:
             raise ValueError('Test review verdict must be pass/revise/uncertain')
         _text(review.get('reason'), 'reason')
@@ -178,12 +158,10 @@ def _review_test_batch(engine, run, task, check, content, key, batch, sources):
                     {'task_id': task['id'], 'path': check['path'], 'key': key, 'review': review})
         engine.store.save(run)
     if review['verdict'] != 'pass':
-        issues = [case for case in review['cases'] if not case['consistent']][:3]
-        details = '\n'.join(
-            f"{', '.join(case.get('assertion_ids', []))}: {case['reason'][:300]}" for case in issues)
-        raise TestExpectationError(f"Test expectation precheck ({review['verdict']}): {review['reason'][:400]}\n"
-            'No Docker check ran. Correct the specific unfrozen test issue before rerunning. Preserve valid assertions and coverage. '
-            'If a requirement is genuinely ambiguous, ask one specific question.\n' + details)
+        raise TestExpectationError('Test expectation precheck: ' + json.dumps(review, ensure_ascii=False) +
+            '\nNo Docker check ran and this script was not frozen. Correct the unfrozen test using write_file/update_file, '
+            'preserve valid cases and declared coverage. Do not change business code to match a wrong expectation. '
+            'If requirements are genuinely ambiguous, ask one specific question.')
     return review
 
 

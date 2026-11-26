@@ -18,7 +18,7 @@ from .retrieval import recall
 from .storage import AGENTS, Store, atomic_json, digest, safe_path, uid
 from .tools import CAPABILITIES, Tools
 from .teams import Teams
-from .interaction import INTERACTION_POLICY, clarification, require_prose, task_locale, task_text
+from .interaction import INTERACTION_POLICY, chinese_prose, clarification, validate_deliverable, validate_plan_language
 from . import verification_guard as guard
 
 
@@ -233,7 +233,7 @@ class Engine:
                "initial_memory_hashes": {a: digest(json.dumps(self.store.memory(a), sort_keys=True).encode()) for a in AGENTS},
                "initial_inputs": [], "failure": None, "finish_recorded": False, "require_review": require_review,
                "knowledge_base_ids": knowledge_base_ids, "revision_count": 0, "revisions": [], "artifact_schema": 2, "execution_schema": 4, "requirements": [],
-               'interaction_locale': 'zh' if self.config.provider == 'demo' else task_locale(goal),
+
                'team_id': team_id, 'team_snapshot': team, 'group_history': history,
                'inherited_inputs': [], 'input_manifest': []}
         self.bind_run(run)
@@ -867,7 +867,7 @@ class Engine:
                 raise ValueError('Test correction must target the observed failing script')
             self.action(run,task,proposal)
         elif guard.enabled(self, run) and category in {'uncertain', 'evidence'}:
-            self.wait(run, task, 'clarification', task_text(run, '验收依据仍不明确，请确认：', 'Please clarify the acceptance criteria: ') + decision['reason'][:700],
+            self.wait(run, task, 'clarification', '验收依据仍不明确，请确认：' + decision['reason'][:700],
                       {'type': 'ask', 'question': decision['reason'][:700]})
         else:
             task['history'].append({'event':'repair_guidance' ,'guidance':
@@ -894,7 +894,7 @@ class Engine:
                 artifact = next(a for a in run['artifacts'] if a['id']==binding['artifact_id'])
                 if expected[binding['path']] != artifact['sha256']:
                     raise ValueError('Authorized input snapshot changed: '+binding['path'])
-        guard.review_test(self, run, task, check, script, expected, target_root=root)
+        guard.review_test(self, run, task, check, script, expected)
         test_snapshot = self.store.archive(run,task['owner'],check['path'],task['id'],origin='verification')
         result = self.tools.sandbox.verify(root, check['path'])
         result['test_artifact'] = {'id':test_snapshot['id'],'sha256':test_snapshot['sha256']}
@@ -1210,7 +1210,7 @@ class Engine:
                 if not reviewer:
                     raise ValueError('Selected target has no independent reviewer; choose its own review or provide clarification')
                 self.request_revision(run,reviewer,'人工质量反馈：'+reason,target_id,origin='human_quality_feedback')
-                self.store.message('group','human',task_text(run, f'质量反馈（{target_id}）：', f'Quality feedback ({target_id}): ') + reason)
+                self.store.message('group','human','质量反馈（'+target_id+'）：'+reason)
                 run['clarifications'].append({'question':'交付验收修改意见','answer':reason,'task_id':target_id})
                 self.emit(run,'human','quality_revision_requested',{'task_id':target_id,'reason':reason,'request_id':request_id})
                 run['human_wait_seconds'] += time.time()-pending['created']

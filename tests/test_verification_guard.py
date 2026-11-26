@@ -87,27 +87,6 @@ class VerificationGuardTests(unittest.TestCase):
         self.assertFalse(self.qa.get('revision_tests'))
         self.assertEqual(self.author['status'], 'succeeded')
 
-    def test_exact_target_source_rechecks_a_cached_blind_rejection(self):
-        binding = self.qa['input_bindings'][0]
-        source = (self.root / binding['path']).read_bytes()
-        expected = {binding['path']: digest(source)}
-        denied = copy.deepcopy(self.review)
-        denied.update(verdict='uncertain', reason='Cannot tell where the implementation stores its data')
-        with patch.object(self.engine, 'model', return_value=denied):
-            with self.assertRaises(guard.TestExpectationError):
-                guard.review_test(self.engine, self.run, self.qa, self.check, self.path, expected)
-
-        evidence = {'success': True, 'output': '', 'verification': {'executed': 1, 'manifest': expected}}
-        with patch.object(self.engine, 'model', return_value=self.review) as model, \
-                patch.object(self.engine.tools.sandbox, 'verify', return_value=evidence) as docker:
-            result = self.engine.verify(self.run, self.qa, self.check)
-        self.assertTrue(result['success'])
-        model.assert_called_once()
-        self.assertEqual(model.call_args.args[2]['target_sources'], [{
-            'path': binding['path'], 'sha256': digest(source), 'complete': True, 'content': source.decode('utf-8'),
-        }])
-        docker.assert_called_once_with(self.root, 'test.py')
-
     def test_review_cache_invalidates_for_script_rules_and_targets(self):
         with patch.object(self.engine, 'model', return_value=self.review) as model:
             self.review_test(); self.review_test(); self.assertEqual(model.call_count, 1)
