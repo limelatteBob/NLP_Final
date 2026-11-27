@@ -1,0 +1,3 @@
+EvoTask course submission verification.
+This file demonstrates approval-gated publication of a pinned text artifact.
+No application source, credentials, personal data or test outputs are included.
